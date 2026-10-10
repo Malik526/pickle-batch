@@ -1,39 +1,49 @@
 """
-media_requirements.py — Instagram Reels media and caption limits, checked
-before anything is sent to Meta (Milestone 4.2).
+media_requirements.py — Instagram Reels media and caption limits (Milestone
+4.2; split into hard limits and normalizable mismatches in 4.2.1).
 
 What it does:
-  check_reel_media(info) and check_caption(caption) return None when
-  acceptable, else a RequirementProblem with a platform-specific reason_code
-  (persisted as platform_posts.failure_code, explained by
-  publishing/failure_taxonomy.py) and an actionable message. Both are
-  terminal: nothing about the file or caption changes by retrying. Nothing is
-  transcoded (out of scope for 4.2): an unsupported file fails clearly.
+  check_duration(seconds)     HARD limit, 3 s–15 min. Never "fixed": trimming
+                              or padding would change the video's content,
+                              so it fails with an actionable reason.
+  check_caption(caption)      HARD: ≤2,200 characters, ≤30 hashtags,
+                              ≤20 @-mentions.
+  compatibility_problems(d)   The NORMALIZABLE mismatches between a probed
+                              file (media/stream_probe.StreamDetails) and
+                              Meta's Reels specification. An empty list means
+                              the file can be sent to Instagram as-is;
+                              otherwise publishing/instagram/normalization.py
+                              makes a compliant derivative. Also the check
+                              every derivative must pass before it's used.
 
   Limits are Meta's published Reels specification (IG User media reference,
-  verified 2026-10-04 — ADR-0018 Decision 5) for the fields ffprobe already
-  gives us (media/inspection.py MediaInfo): container MOV/MP4, video
-  H.264/HEVC, audio AAC when present, 23–60 fps, 3 s–15 min, ≤300 MB, at most
-  1920 px horizontally. Bitrate, GOP and moov-atom placement aren't probed;
-  Meta reports those through the container's ERROR status instead.
-  Captions: ≤2,200 characters, ≤30 hashtags, ≤20 @-mentions.
+  verified 2026-10-04 — ADR-0018): MOV/MP4, H.264 or HEVC, progressive 4:2:0,
+  AAC ≤48 kHz mono/stereo, 23–60 fps, ≤25 Mbps video, ≤300 MB, at most 1920
+  horizontal pixels. "Horizontal" is the displayed width, after the rotation
+  flag phones write (a portrait iPhone clip is coded landscape). Only 8-bit
+  4:2:0 counts as compatible: 10-bit/HDR sources are normalized rather than
+  sent as-is.
 
 Dependencies:
-  media.inspection (MediaInfo).
+  media.stream_probe (StreamDetails).
 """
 
 import re
 from dataclasses import dataclass
 
-from content_automation.media.inspection import MediaInfo
+from content_automation.media.stream_probe import StreamDetails
 
 CONTAINERS = frozenset({"mov", "mp4"})
 VIDEO_CODECS = frozenset({"h264", "hevc"})
+PIXEL_FORMATS = frozenset({"yuv420p", "yuvj420p"})
 AUDIO_CODECS = frozenset({"aac"})
+MAX_AUDIO_SAMPLE_RATE = 48_000
+MAX_AUDIO_CHANNELS = 2
 MIN_FPS, MAX_FPS = 23.0, 60.0
 MIN_DURATION_SECONDS, MAX_DURATION_SECONDS = 3.0, 15 * 60.0
 MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024
 MAX_WIDTH_PIXELS = 1920
+MAX_VIDEO_BITRATE = 25_000_000
 
 CAPTION_MAX_CHARS = 2200
 CAPTION_MAX_HASHTAGS = 30
@@ -42,6 +52,11 @@ CAPTION_MAX_MENTIONS = 20
 _HASHTAG = re.compile(r"(?<![\w#])#\w+", re.UNICODE)
 _MENTION = re.compile(r"(?<![\w@])@[A-Za-z0-9._]+")
 
+# compatibility_problems() labels (internal, logged; not failure codes).
+CONTAINER, VIDEO_CODEC, PIXEL_FORMAT, RESOLUTION, FRAME_RATE, BITRATE, AUDIO, FILE_SIZE = (
+    "container", "video_codec", "pixel_format", "resolution", "frame_rate", "bitrate", "audio", "file_size",
+)
+
 
 @dataclass(frozen=True)
 class RequirementProblem:
@@ -49,35 +64,38 @@ class RequirementProblem:
     message: str
 
 
-def _container_key(info: MediaInfo) -> str:
-    # ffprobe reports MOV and MP4 as one format family ("mov,mp4,m4a,3gp,…").
-    names = {name.strip() for name in info.container.lower().split(",")}
-    if "mp4" in names or info.path.suffix.lower() == ".mp4":
-        return "mp4"
-    if "mov" in names or info.path.suffix.lower() == ".mov":
-        return "mov"
-    return info.container.lower()
-
-
-def check_reel_media(info: MediaInfo) -> RequirementProblem | None:
-    if _container_key(info) not in CONTAINERS:
-        return RequirementProblem("INSTAGRAM_MEDIA_UNSUPPORTED_FORMAT", f"Instagram Reels must be MOV or MP4 (this file is {info.container}).")
-    if info.video_codec not in VIDEO_CODECS:
-        return RequirementProblem("INSTAGRAM_MEDIA_UNSUPPORTED_CODEC", f"Instagram Reels must be H.264 or HEVC video (this file is {info.video_codec or 'not a video'}).")
-    if info.audio_codec is not None and info.audio_codec not in AUDIO_CODECS:
-        return RequirementProblem("INSTAGRAM_MEDIA_UNSUPPORTED_CODEC", f"Instagram Reels audio must be AAC (this file is {info.audio_codec}).")
-    if info.duration_seconds is None or not MIN_DURATION_SECONDS <= info.duration_seconds <= MAX_DURATION_SECONDS:
-        return RequirementProblem("INSTAGRAM_MEDIA_DURATION", f"Instagram Reels must be 3 seconds to 15 minutes long (this video is {_seconds(info.duration_seconds)}).")
-    if info.fps is None or not MIN_FPS <= info.fps <= MAX_FPS:
-        return RequirementProblem("INSTAGRAM_MEDIA_FRAME_RATE", f"Instagram Reels must be 23–60 frames per second (this video is {info.fps or 'unknown'} fps).")
-    if info.file_size_bytes > MAX_FILE_SIZE_BYTES:
-        return RequirementProblem("INSTAGRAM_MEDIA_TOO_LARGE", f"Instagram Reels must be 300 MB or smaller (this file is {info.file_size_bytes // (1024 * 1024)} MB).")
-    if info.width is None or info.width > MAX_WIDTH_PIXELS:
+def check_duration(seconds: float | None) -> RequirementProblem | None:
+    if seconds is None or not MIN_DURATION_SECONDS <= seconds <= MAX_DURATION_SECONDS:
+        length = "of unknown length" if seconds is None else f"{seconds:.1f} seconds"
         return RequirementProblem(
-            "INSTAGRAM_MEDIA_RESOLUTION",
-            f"Instagram Reels can be at most 1920 pixels wide (this video is {info.width or 'unknown'} pixels). Export it at 1080p and upload it again.",
+            "INSTAGRAM_MEDIA_DURATION", f"Instagram Reels must be 3 seconds to 15 minutes long (this video is {length}).",
         )
     return None
+
+
+def compatibility_problems(details: StreamDetails) -> list[str]:
+    problems = []
+    if not details.format_names & CONTAINERS:
+        problems.append(CONTAINER)
+    if details.video_codec not in VIDEO_CODECS:
+        problems.append(VIDEO_CODEC)
+    if details.pixel_format not in PIXEL_FORMATS or details.is_hdr:
+        problems.append(PIXEL_FORMAT)
+    if details.display_width > MAX_WIDTH_PIXELS:
+        problems.append(RESOLUTION)
+    if details.fps is None or not MIN_FPS <= details.fps <= MAX_FPS:
+        problems.append(FRAME_RATE)
+    if details.video_bitrate is not None and details.video_bitrate > MAX_VIDEO_BITRATE:
+        problems.append(BITRATE)
+    if details.audio_codec is not None and (
+        details.audio_codec not in AUDIO_CODECS
+        or (details.audio_sample_rate or 0) > MAX_AUDIO_SAMPLE_RATE
+        or (details.audio_channels or 0) > MAX_AUDIO_CHANNELS
+    ):
+        problems.append(AUDIO)
+    if details.file_size_bytes > MAX_FILE_SIZE_BYTES:
+        problems.append(FILE_SIZE)
+    return problems
 
 
 def check_caption(caption: str | None) -> RequirementProblem | None:
@@ -90,7 +108,3 @@ def check_caption(caption: str | None) -> RequirementProblem | None:
     if len(_MENTION.findall(caption)) > CAPTION_MAX_MENTIONS:
         return RequirementProblem("INSTAGRAM_CAPTION_TOO_MANY_MENTIONS", f"Instagram captions can have at most {CAPTION_MAX_MENTIONS} @-mentions.")
     return None
-
-
-def _seconds(value: float | None) -> str:
-    return "of unknown length" if value is None else f"{value:.1f} seconds"

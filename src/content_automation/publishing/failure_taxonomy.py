@@ -97,6 +97,9 @@ _SHARED_CODE_CATEGORIES: dict[str, str] = {
     "INSTAGRAM_CONTAINER_ERROR": "PLATFORM_REJECTED",
     "INSTAGRAM_CONTAINER_EXPIRED": "PLATFORM_REJECTED",
     "PUBLISH_OUTCOME_UNKNOWN": "UNKNOWN_ERROR",
+    # Milestone 4.2.1: making an Instagram-compatible derivative failed.
+    "INSTAGRAM_MEDIA_PREPARATION_FAILED": "MEDIA_INVALID",
+    "INSTAGRAM_MEDIA_PREPARATION_TIMEOUT": "MEDIA_INVALID",
     # HTTP_ERROR / PUBLISH_FAILED / TIKTOK_API_ERROR / PRECONDITION_FAILED
     # are deliberately unlisted: without the HTTP status (not persisted)
     # they could be anything, so they fall through to UNKNOWN_ERROR.
@@ -122,7 +125,11 @@ _CODE_MESSAGE_OVERRIDES: dict[str, str] = {
     "CAPTION_TOO_LONG": "Caption is too long for {platform}.",
     "CAPTION_MISSING": "This video has no caption yet.",
     # Milestone 4.2 — the actionable cases for Instagram Reels.
-    "INSTAGRAM_MEDIA_RESOLUTION": "{platform} Reels can be at most 1920 pixels wide. Export the video at 1080p and upload it again.",
+    # No longer raised since Milestone 4.2.1 (oversized videos are normalized
+    # automatically); kept for rows that failed with it before. Retry fixes them.
+    "INSTAGRAM_MEDIA_RESOLUTION": "This video was too large for {platform} before automatic resizing existed. Retry to publish it.",
+    "INSTAGRAM_MEDIA_PREPARATION_FAILED": "This video could not be prepared for {platform}.",
+    "INSTAGRAM_MEDIA_PREPARATION_TIMEOUT": "Preparing this video for {platform} took too long.",
     "INSTAGRAM_MEDIA_DURATION": "{platform} Reels must be between 3 seconds and 15 minutes long.",
     "INSTAGRAM_MEDIA_FRAME_RATE": "{platform} Reels must be 23–60 frames per second.",
     "INSTAGRAM_MEDIA_TOO_LARGE": "{platform} Reels must be 300 MB or smaller.",

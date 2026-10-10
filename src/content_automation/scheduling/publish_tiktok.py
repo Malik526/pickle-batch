@@ -99,6 +99,7 @@ from pathlib import Path
 
 from content_automation.config import (
     INSTAGRAM_MEDIA_URL_TTL_SECONDS,
+    INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS,
     MAX_RETRY_ATTEMPTS,
     RETRY_BACKOFF_MINUTES,
     STATUS_CHECK_BACKOFF_SECONDS,
@@ -108,7 +109,8 @@ from content_automation.media.media_storage import MediaNotUploadedError, MediaO
 from content_automation.persistence.content_store import ContentStore, PlatformPostRecord, VideoRecord
 from content_automation.publishing.caption_resolution import resolve_publish_caption
 from content_automation.publishing.instagram import media_requirements as instagram_requirements
-from content_automation.publishing.platforms import INSTAGRAM, PLATFORMS, PULL_URL, TIKTOK
+from content_automation.publishing.instagram.media_preparation import PreparationError, prepare_publishable_media
+from content_automation.publishing.platforms import PLATFORMS, PULL_URL, TIKTOK
 from content_automation.publishing.publisher import STATUS_READY_TO_FINALIZE, PublishError, Publisher, PublishStatusResult
 from content_automation.scheduling.finalization import finalize_ready_submission
 from content_automation.storage.signed_urls import SignedUrlUnsupportedError
@@ -199,15 +201,9 @@ def _stored_media_info(video: VideoRecord, media_path: Path) -> media.MediaInfo:
 
 
 def _check_platform_requirements(video: VideoRecord, info: media.MediaInfo, platform: str) -> None:
-    """Platform-specific media and caption limits (Milestone 4.2: Instagram
-    Reels have their own; TikTok's check is unchanged)."""
-    if platform == INSTAGRAM:
-        problem = instagram_requirements.check_reel_media(info) or instagram_requirements.check_caption(
-            resolve_publish_caption(video, INSTAGRAM)
-        )
-        if problem is not None:
-            raise PublishTikTokError(f"Video {video.id}: {problem.message}", reason_code=problem.reason_code)
-        return
+    """Platform-specific media limits for push-file platforms (TikTok)."""
+    # Instagram never reaches this push-file path: its limits are applied in
+    # _execute_pull_url_post and publishing/instagram/media_preparation.py.
     compatible, reason = media.is_tiktok_compatible(info)
     if not compatible:
         raise PublishTikTokError(f"Video {video.id} is not TikTok-compatible: {reason}", reason_code="MEDIA_INCOMPATIBLE")
@@ -561,10 +557,10 @@ def _execute_pull_url_post(
     storage: StorageProtocol | None,
 ) -> None:
     """Milestone 4.2: a platform that fetches the video itself (Instagram).
-    The canonical object stays private; the platform gets a short-lived
-    signed URL issued just before submission. The file is downloaded only
-    when it has never been inspected (to probe it); otherwise the stored
-    metadata is validated without touching the bytes."""
+    Stored objects stay private; the platform gets a short-lived signed URL
+    issued just before submission — since 4.2.1 for the object
+    publishing/instagram/media_preparation.py resolves (the original, or a
+    normalized derivative)."""
     if not video.storage_provider or not video.storage_key or storage is None:
         exc = PublishTikTokError(
             f"video {video.id} isn't in object storage, which {_label(record.platform)} needs to fetch it from.",
@@ -573,30 +569,53 @@ def _execute_pull_url_post(
         _mark_precondition_failed(store, record, exc)
         raise exc
 
-    if video.container is None:
-        try:
-            with _resolved_media_path(store, video, storage) as media_path:
-                try:
-                    _validate_ready_to_publish(store, video, media_path, record.platform)
-                except PublishTikTokError as exc:
-                    _mark_precondition_failed(store, record, exc)
-                    raise
-        except _MATERIALIZATION_ERRORS as exc:
-            error = _materialization_publish_error(exc)
-            _schedule_retry_or_fail(store, record, error)
-            raise PublishTikTokError(f"Could not load media for video {video.id}: {error}") from exc
-        video = store.get_video(video.id)
-    else:
-        try:
-            _check_platform_requirements(video, _stored_media_info(video, Path(video.storage_key)), record.platform)
-        except PublishTikTokError as exc:
-            _mark_precondition_failed(store, record, exc)
-            raise
+    # Hard limits first, from data already stored, so a video that can never
+    # go to Instagram fails without being downloaded.
+    hard_problem = instagram_requirements.check_caption(resolve_publish_caption(video, record.platform))
+    if hard_problem is None and video.duration_seconds is not None:
+        hard_problem = instagram_requirements.check_duration(video.duration_seconds)
+    if hard_problem is not None:
+        exc = PublishTikTokError(f"Video {video.id}: {hard_problem.message}", reason_code=hard_problem.reason_code)
+        _mark_precondition_failed(store, record, exc)
+        raise exc
 
+    # Milestone 4.2.1: the stored object Instagram fetches is the original
+    # when it already meets the Reels spec, otherwise a normalized private
+    # derivative (made once, then reused). The heartbeat keeps this claim
+    # fresh during a long encode.
+    try:
+        prepared = prepare_publishable_media(
+            store, storage, video,
+            heartbeat=lambda: store.update_platform_post(record.id, updated_at=_now_iso()),
+            timeout_seconds=INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS,
+            on_probed=lambda details: _persist_probed_metadata(store, video, details),
+        )
+    except PreparationError as exc:
+        error = PublishTikTokError(f"Video {video.id}: {exc}", reason_code=exc.reason_code)
+        _mark_precondition_failed(store, record, error)
+        raise error from None
+    except _MATERIALIZATION_ERRORS as exc:
+        error = _materialization_publish_error(exc)
+        _schedule_retry_or_fail(store, record, error)
+        raise PublishTikTokError(f"Could not load media for video {video.id}: {error}") from exc
+
+    video = store.get_video(video.id)
     _submit(
-        store, video, record, Path(video.storage_key), publisher,
-        media_url=lambda: storage.create_signed_url(video.storage_key, INSTAGRAM_MEDIA_URL_TTL_SECONDS),
+        store, video, record, Path(prepared.storage_key), publisher,
+        media_url=lambda: storage.create_signed_url(prepared.storage_key, INSTAGRAM_MEDIA_URL_TTL_SECONDS),
     )
+
+
+def _persist_probed_metadata(store: ContentStore, video: VideoRecord, details) -> None:
+    """Cache a never-inspected video's probe in its row (Milestone 3.13's
+    convention), in the same format media.inspection writes."""
+    if video.container is not None:
+        return
+    _persist_media_metadata(store, video, media.MediaInfo(
+        path=details.path, container=details.container, video_codec=details.video_codec,
+        audio_codec=details.audio_codec, width=details.coded_width, height=details.coded_height, fps=details.fps,
+        duration_seconds=details.duration_seconds, file_size_bytes=details.file_size_bytes,
+    ))
 
 
 def _issue_media_url(issue: Callable[[], str]) -> str:

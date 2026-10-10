@@ -560,6 +560,12 @@ INSTAGRAM_GRAPH_API_VERSION = os.getenv("INSTAGRAM_GRAPH_API_VERSION") or "v25.0
 # falls back instead of crashing int("") at import.
 INSTAGRAM_MEDIA_URL_TTL_SECONDS = int(os.getenv("INSTAGRAM_MEDIA_URL_TTL_SECONDS") or "3600")
 
+# Milestone 4.2.1: the longest the worker spends making an Instagram-compatible
+# derivative of one video before failing it (INSTAGRAM_MEDIA_PREPARATION_TIMEOUT).
+# The claimed post's updated_at is refreshed about once a minute meanwhile, so
+# crash recovery never treats a long encode as a stalled claim.
+INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS = int(os.getenv("INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS") or "3600")
+
 # Milestone 4.1: when a stored long-lived Instagram token (60 days) is
 # refreshed. Meta allows a refresh once the token is at least 24 hours old
 # and still valid; this refreshes on first use once fewer than this many

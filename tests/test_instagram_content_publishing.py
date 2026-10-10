@@ -9,7 +9,6 @@ import pytest
 import requests
 
 from content_automation import config
-from content_automation.media.inspection import MediaInfo
 from content_automation.publishing.instagram import content_publishing as api
 from content_automation.publishing.instagram import media_requirements as reqs
 from content_automation.publishing.instagram import publisher as ig_publisher
@@ -249,36 +248,55 @@ def test_hosted_credentials_translate_auth_and_credential_failures(tmp_path, mon
         assert raised.value.reason_code == "CREDENTIAL_UNAVAILABLE"
 
 
-# --- Reels requirements ----------------------------------------------------------------------
+# --- Reels requirements (Milestone 4.2.1: hard limits vs normalizable) ------------------
 
-def _info(**overrides):
-    base = dict(path=Path("clip.mp4"), container="mov,mp4,m4a,3gp,3g2,mj2", video_codec="h264", audio_codec="aac",
-                width=1080, height=1920, fps=30.0, duration_seconds=12.0, file_size_bytes=20 * 1024 * 1024)
-    return MediaInfo(**{**base, **overrides})
+def _details(**overrides):
+    from content_automation.media.stream_probe import StreamDetails
+
+    base = dict(path=Path("clip.mp4"), container="mov", format_names=frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}),
+                video_codec="h264", pixel_format="yuv420p", coded_width=1080, coded_height=1920, rotation=0, fps=30.0,
+                video_bitrate=8_000_000, audio_codec="aac", audio_sample_rate=44_100, audio_channels=2,
+                color_transfer=None, duration_seconds=12.0, file_size_bytes=20 * 1024 * 1024)
+    return StreamDetails(**{**base, **overrides})
 
 
-def test_a_standard_1080p_reel_passes():
-    assert reqs.check_reel_media(_info()) is None
-    assert reqs.check_reel_media(_info(audio_codec=None, video_codec="hevc", path=Path("c.mov"), container="mov")) is None
+def test_a_standard_1080p_reel_is_compatible_as_is():
+    assert reqs.compatibility_problems(_details()) == []
+    assert reqs.compatibility_problems(_details(audio_codec=None, video_codec="hevc", format_names=frozenset({"mov"}))) == []
+    # iPhone portrait 1080p: coded landscape + 90° rotation → displays 1080 wide.
+    assert reqs.compatibility_problems(_details(coded_width=1920, coded_height=1080, rotation=90)) == []
 
 
 @pytest.mark.parametrize(
-    ("overrides", "code"),
+    ("overrides", "problem"),
     [
-        ({"container": "matroska,webm", "path": Path("c.mkv")}, "INSTAGRAM_MEDIA_UNSUPPORTED_FORMAT"),
-        ({"video_codec": "vp9"}, "INSTAGRAM_MEDIA_UNSUPPORTED_CODEC"),
-        ({"audio_codec": "opus"}, "INSTAGRAM_MEDIA_UNSUPPORTED_CODEC"),
-        ({"duration_seconds": 2.0}, "INSTAGRAM_MEDIA_DURATION"),
-        ({"duration_seconds": 16 * 60.0}, "INSTAGRAM_MEDIA_DURATION"),
-        ({"fps": 15.0}, "INSTAGRAM_MEDIA_FRAME_RATE"),
-        ({"fps": 120.0}, "INSTAGRAM_MEDIA_FRAME_RATE"),
-        ({"file_size_bytes": 301 * 1024 * 1024}, "INSTAGRAM_MEDIA_TOO_LARGE"),
-        ({"width": 3840, "height": 2160}, "INSTAGRAM_MEDIA_RESOLUTION"),  # the real 4K iPhone uploads
+        ({"format_names": frozenset({"matroska", "webm"})}, reqs.CONTAINER),
+        ({"video_codec": "vp9"}, reqs.VIDEO_CODEC),
+        ({"pixel_format": "yuv420p10le"}, reqs.PIXEL_FORMAT),
+        ({"color_transfer": "arib-std-b67"}, reqs.PIXEL_FORMAT),  # HLG HDR
+        ({"coded_width": 3840, "coded_height": 2160, "rotation": 90}, reqs.RESOLUTION),  # iPhone portrait 4K
+        ({"coded_width": 3840, "coded_height": 2160}, reqs.RESOLUTION),  # landscape 4K
+        ({"fps": 15.0}, reqs.FRAME_RATE),
+        ({"fps": 120.0}, reqs.FRAME_RATE),
+        ({"video_bitrate": 40_000_000}, reqs.BITRATE),
+        ({"audio_codec": "opus"}, reqs.AUDIO),
+        ({"audio_sample_rate": 96_000}, reqs.AUDIO),
+        ({"audio_channels": 6}, reqs.AUDIO),
+        ({"file_size_bytes": 301 * 1024 * 1024}, reqs.FILE_SIZE),
     ],
 )
-def test_unsupported_media_is_rejected_with_an_actionable_reason(overrides, code):
-    problem = reqs.check_reel_media(_info(**overrides))
-    assert problem is not None and problem.reason_code == code and problem.message
+def test_normalizable_mismatches_are_reported(overrides, problem):
+    assert problem in reqs.compatibility_problems(_details(**overrides))
+
+
+@pytest.mark.parametrize("seconds", [None, 2.9, 15 * 60 + 1])
+def test_duration_is_a_hard_limit(seconds):
+    problem = reqs.check_duration(seconds)
+    assert problem is not None and problem.reason_code == "INSTAGRAM_MEDIA_DURATION" and problem.message
+
+
+def test_duration_within_limits_passes():
+    assert reqs.check_duration(3.0) is None and reqs.check_duration(15 * 60) is None
 
 
 def test_caption_limits_are_instagram_specific():

@@ -40,6 +40,10 @@ What it does:
   upsert contract) — see Phase 28 of the Milestone 3.4 brief ("document
   the current protection... do not create an expensive locking subsystem
   unless evidence requires one").
+  Milestone 4.2.1: platform derivatives live beside the source at
+  users/<user_id>/videos/<video_id>/derived/<platform>/<name>
+  (build_derived_storage_key). They stay private like the source and are
+  never written over it.
 
 Future media intelligence (Milestone 3.7 follow-up — deliberately not
 built here; see this module's own guardrail against synchronous probing
@@ -125,6 +129,37 @@ def build_storage_key(user_id: int, video_id: int, suffix: str) -> str:
     deterministic, unique per video, no user-provided filename or secret
     information embedded. See module docstring "Storage key format"."""
     return f"users/{user_id}/videos/{video_id}/source{suffix}"
+
+
+def build_derived_storage_key(user_id: int, video_id: int, platform: str, name: str) -> str:
+    """users/<user_id>/videos/<video_id>/derived/<platform>/<name> — a
+    platform-specific derivative of the canonical source (Milestone 4.2.1),
+    next to it in the same private bucket. `name` encodes everything the
+    derivative depends on (policy version + source hash), so a reusable
+    derivative is found by key alone and a changed source maps to a new key."""
+    return f"users/{user_id}/videos/{video_id}/derived/{platform}/{name}"
+
+
+def derived_media_exists(store: ContentStoreProtocol, storage: StorageProtocol, video_id: int, user_id: int, key: str) -> bool:
+    """Whether an owned video's derivative is already stored at `key`."""
+    _require_own_derived_key(store, video_id, user_id, key)
+    return storage.exists(key)
+
+
+def store_derived_media(
+    store: ContentStoreProtocol, storage: StorageProtocol, video_id: int, user_id: int, key: str, local_path: Path,
+) -> None:
+    """Upload a verified derivative for an owned video. The canonical source
+    is never touched; the upload is an upsert of the same key, so two
+    attempts racing on one video converge on an equivalent verified file."""
+    _require_own_derived_key(store, video_id, user_id, key)
+    storage.put(key, local_path)
+
+
+def _require_own_derived_key(store, video_id: int, user_id: int, key: str) -> None:
+    video = _get_owned_video(store, video_id, user_id)
+    if not key.startswith(f"users/{video.user_id}/videos/{video.id}/derived/"):
+        raise MediaOwnershipError(f"derived key does not belong to video {video_id}.")
 
 
 def _get_owned_video(store: ContentStore | ContentStoreProtocol, video_id: int, user_id: int) -> VideoRecord:
