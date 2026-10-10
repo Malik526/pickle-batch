@@ -2,10 +2,11 @@
  * site-config.ts — single source of truth for site-wide text/contact
  * details used across layout, metadata, and the privacy/terms pages.
  *
- * contactEmail is a PLACEHOLDER — replace it with a real, monitored
- * address before this site is deployed publicly or submitted anywhere
- * (including TikTok Developer Portal review), since /privacy and /terms
- * both promise it as a real contact method.
+ * contactEmail is the real, monitored contact address shown on /privacy,
+ * /terms, /data-deletion and the footer (2026-10-10: replaced the former
+ * placeholder support@content-automation.app, a domain with no mail
+ * records). Keep it a monitored inbox: Meta and TikTok reviewers and users
+ * rely on it for data requests.
  */
 export const siteConfig = {
   name: "Pickle Batch",
@@ -13,5 +14,5 @@ export const siteConfig = {
   description:
     "Pickle Batch helps creators batch their finished videos, organize them into a posting schedule, and automate the repetitive work between creating content and publishing it.",
   url: "https://contentautomation.app",
-  contactEmail: "support@content-automation.app",
+  contactEmail: "malik23stewart23@gmail.com",
 } as const;

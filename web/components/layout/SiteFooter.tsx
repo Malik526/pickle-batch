@@ -11,12 +11,15 @@ export function SiteFooter() {
         <p>
           © {year} {siteConfig.name}. In active development.
         </p>
-        <nav className="flex gap-6">
+        <nav className="flex flex-wrap gap-x-6 gap-y-2">
           <Link href="/privacy" className="hover:text-ink">
             Privacy Policy
           </Link>
           <Link href="/terms" className="hover:text-ink">
             Terms of Service
+          </Link>
+          <Link href="/data-deletion" className="hover:text-ink">
+            Data Deletion
           </Link>
           <a href={`mailto:${siteConfig.contactEmail}`} className="hover:text-ink">
             Contact

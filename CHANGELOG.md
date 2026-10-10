@@ -1,5 +1,35 @@
 # Content Automation — Changelog
 
+## 2026-10-10
+
+### Web — Public User Data Deletion Page and Real Contact Address
+
+- New public `/data-deletion` page (`web/app/(marketing)/data-deletion/page.tsx`): Meta's "Data
+  deletion instructions URL". It is static and needs no login or JavaScript. It covers:
+  - how to request deletion by email (prefilled "Data Deletion Request" subject, sender
+    verification);
+  - the in-app controls that really exist (delete a video in Library; disconnect a platform in
+    Settings removes stored tokens);
+  - the data categories Pickle Batch actually stores;
+  - Pickle Batch data vs Meta accounts and data;
+  - revoking access through Meta's settings;
+  - conservative retention wording, and links to the Privacy Policy and contact.
+- It deliberately makes no promise of deletion timing, automated deletion, deletion from backups
+  or deletion from Meta's systems. It is not Meta's Data Deletion Callback endpoint, which doesn't
+  exist yet.
+- Footer links "Data Deletion" (and now wraps on narrow screens). Legal pages style numbered lists
+  (`.legal-content ol`).
+- `siteConfig.contactEmail` is now a real, monitored address. The former placeholder
+  `support@content-automation.app` used a domain with no mail records, so the Privacy Policy,
+  Terms and footer were advertising an undeliverable address. All four pages now share the new
+  address.
+- Verified:
+  - Frontend 208/208, eslint, `tsc --noEmit`, `next build` (exports `out/data-deletion/index.html`).
+  - Chromium with JavaScript disabled at 390 px: 200, all sections, no horizontal overflow, mailto
+    and Privacy links valid.
+  - Production returns 404 until deployed. `/privacy` shows the expected pattern after deploy
+    (301 → trailing slash → 200).
+
 ## 2026-10-06
 
 ### Milestone 4.1 — Instagram OAuth Integration (M4.1A)

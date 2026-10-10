@@ -74,6 +74,11 @@ Railway's Variables tab and your local `.env`.
 - **Deauthorize callback** and **data deletion request** URLs in Business login settings, plus a
   privacy policy URL (`https://picklebatch.netlify.app/privacy`) and app icon/details for review.
   The callback routes are built before review.
+- **Update 2026-10-10:** the data deletion **instructions** page exists:
+  `https://picklebatch.netlify.app/data-deletion/`, live once deployed. Enter it under App
+  settings > Basic > User data deletion > Data deletion instructions URL. Meta's data deletion
+  **callback** (a signed backend request) is still not built and isn't required when the
+  instructions URL is used. The public contact address is now a real, monitored inbox.
 - A screencast and use-case descriptions for review: connect → choose a Reel → scheduled publish.
 - Switching the app to **Live** mode.
 - If Google sign-in remains, plan Sign in with Apple before the iOS App Store (unrelated to Meta
