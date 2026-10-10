@@ -75,6 +75,7 @@ from content_automation.persistence.content_store import ContentStore
 from content_automation.publishing.publisher import PublishError, Publisher
 from content_automation.scheduling.publish_tiktok import AWAITING_PLATFORM_ID, _resolve_poll_outcome
 from content_automation.scheduling.slot_matcher import now_in_config_timezone
+from content_automation.scheduling.finalization import finalize_ready_submission
 from content_automation.scheduling.worker import log_event
 
 
@@ -177,7 +178,18 @@ def recover_stale_posts_once(
         # status_check_count the way reconciliation.py does, for the same
         # reason it never refreshed updated_at — see the comment below.
         outcome, fields = _resolve_poll_outcome(status_result)
-        if outcome == "PUBLISHED":
+        if outcome == "READY":
+            # Milestone 4.2: processed but not posted (Instagram container
+            # FINISHED) — finalization decides whether posting is safe.
+            result = finalize_ready_submission(store, record, publisher, now=now, user_id=user_id)
+            if result == "PUBLISHED":
+                summary.published += 1
+            elif result == "UNKNOWN":
+                summary.unknown += 1
+            else:
+                summary.still_processing += 1
+            log_event("recovery_polled", **ids, outcome=result)
+        elif outcome == "PUBLISHED":
             updated = store.update_platform_post_if_unchanged(
                 record.id, expected_updated_at=record.updated_at, updated_at=_now_iso(), user_id=user_id, **fields
             )

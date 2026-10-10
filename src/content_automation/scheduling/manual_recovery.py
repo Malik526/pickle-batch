@@ -53,7 +53,11 @@ from datetime import datetime, timedelta, timezone
 from content_automation.config import RETRY_BACKOFF_MINUTES
 from content_automation.persistence.content_store import PlatformPostRecord
 from content_automation.persistence.protocol import ContentStoreProtocol
-from content_automation.publishing.publish_status import post_can_retry, post_retry_requires_confirmation
+from content_automation.publishing.publish_status import (
+    PUBLISH_REQUESTED,
+    post_can_retry,
+    post_retry_requires_confirmation,
+)
 from content_automation.scheduling.slot_matcher import now_in_config_timezone
 from content_automation.scheduling.worker import log_event
 
@@ -83,9 +87,16 @@ def retry_platform_post(
         )
 
     now_utc = datetime.now(timezone.utc).isoformat()
-    if post.status == "UNKNOWN" and post.platform_post_id and not confirm_not_published:
+    publish_requested = post.submission_state == PUBLISH_REQUESTED
+    if post.status == "UNKNOWN" and post.platform_post_id and (not confirm_not_published or publish_requested):
+        # Milestone 4.2: a confirmed retry of a parked Instagram publish
+        # re-checks the SAME container (its status is read before anything
+        # is posted), clearing the checkpoint so finalization may publish it
+        # if it is still unpublished. It never creates a new container.
         decision = "RECHECK"
         fields = {"status": "PUBLISHING", "status_check_count": 0, "next_status_check_at": None}
+        if publish_requested:
+            fields["submission_state"] = None
     else:
         decision = "RESUBMIT"
         next_retry_at = (now_in_config_timezone() + timedelta(minutes=RETRY_BACKOFF_MINUTES[0])).isoformat()

@@ -89,7 +89,9 @@ from content_automation.persistence.protocol import ContentStoreProtocol
 from content_automation.publishing.publish_status import resolve_slot_publish_status
 from content_automation.scheduling.manual_recovery import RetryRejectedError, retry_platform_post
 from content_automation.scheduling.queue_assignment import (
+    InvalidPlatformSelectionError,
     NoOpenSlotAvailableError,
+    PlatformNotConnectedError,
     VideoAlreadyScheduledError,
     assign_video_to_next_open_slot,
     assign_video_to_slot,
@@ -164,7 +166,11 @@ def assign_slot_manually(
     _get_owned_slot(store, slot_id, user.id)
     _get_owned_video_id(store, body.video_id, user.id)
     try:
-        slot = assign_video_to_slot(store, body.video_id, slot_id, _now_iso(), user_id=user.id)
+        slot = assign_video_to_slot(store, body.video_id, slot_id, _now_iso(), user_id=user.id, platforms=body.platforms)
+    except InvalidPlatformSelectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PlatformNotConnectedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except SlotUnavailableError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except (OwnershipMismatchError, VideoAlreadyScheduledError) as exc:
@@ -180,7 +186,11 @@ def assign_next_open_slot(
 ) -> QueueSlotResponse:
     _get_owned_video_id(store, body.video_id, user.id)
     try:
-        slot = assign_video_to_next_open_slot(store, body.video_id, _now_iso(), user_id=user.id)
+        slot = assign_video_to_next_open_slot(store, body.video_id, _now_iso(), user_id=user.id, platforms=body.platforms)
+    except InvalidPlatformSelectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PlatformNotConnectedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except NoOpenSlotAvailableError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except VideoAlreadyScheduledError as exc:

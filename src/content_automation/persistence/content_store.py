@@ -518,6 +518,13 @@ _PLATFORM_POSTS_MIGRATION_COLUMNS = {
     "submission_state": "TEXT",
     # Aware UTC, when the most recent submission attempt began. Diagnostic.
     "submission_started_at": "TEXT",
+    # Milestone 4.2: the platform's id for the PUBLISHED post when it differs
+    # from the submission handle in platform_post_id. Instagram:
+    # platform_post_id = the media container id (what status checks use and
+    # what recovery needs); platform_media_id = the published Reel's media id
+    # from media_publish. NULL until published, and also NULL if publication
+    # was only confirmed from the container's status. TikTok leaves it NULL.
+    "platform_media_id": "TEXT",
 }
 
 
@@ -936,6 +943,8 @@ class PlatformPostRecord:
     # Milestone 3.13 — see _PLATFORM_POSTS_MIGRATION_COLUMNS.
     submission_state: str | None = None
     submission_started_at: str | None = None
+    # Milestone 4.2 — see _PLATFORM_POSTS_MIGRATION_COLUMNS.
+    platform_media_id: str | None = None
 
 
 @dataclass

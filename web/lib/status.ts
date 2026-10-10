@@ -42,6 +42,23 @@ export function presentQueueStatus(displayStatus: string): { label: string; tone
   return QUEUE_STATUS_PRESENTATION[displayStatus] ?? QUEUE_STATUS_PRESENTATION.NEEDS_ATTENTION;
 }
 
+/**
+ * One platform's delivery state for the Queue (Milestone 4.2). Same labels as
+ * presentQueueStatus, plus "Processing" while Instagram processes the upload
+ * and "Unknown" when the outcome couldn't be determined.
+ */
+export function presentDelivery(publication: { display_status: string; platform_post_status: string; stage?: string | null }): {
+  label: string;
+  tone: StatusTone;
+} {
+  if (publication.platform_post_status === "UNKNOWN") return { label: "Unknown", tone: "attention" };
+  if (publication.display_status === PublishStatus.PUBLISHING && publication.stage === "PROCESSING") {
+    return { label: "Processing", tone: "progress" };
+  }
+  const { label, tone } = presentQueueStatus(publication.display_status);
+  return { label, tone };
+}
+
 /** Library filter tabs (Milestone 3.14 final follow-up). */
 export type LibraryFilter = "all" | "unscheduled" | "scheduled" | "published";
 

@@ -92,16 +92,26 @@ Dependencies:
 
 import logging
 import sys
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from content_automation.config import MAX_RETRY_ATTEMPTS, RETRY_BACKOFF_MINUTES, STATUS_CHECK_BACKOFF_SECONDS
+from content_automation.config import (
+    INSTAGRAM_MEDIA_URL_TTL_SECONDS,
+    MAX_RETRY_ATTEMPTS,
+    RETRY_BACKOFF_MINUTES,
+    STATUS_CHECK_BACKOFF_SECONDS,
+)
 from content_automation.media import inspection as media
 from content_automation.media.media_storage import MediaNotUploadedError, MediaOwnershipError, materialize_canonical_media
 from content_automation.persistence.content_store import ContentStore, PlatformPostRecord, VideoRecord
 from content_automation.publishing.caption_resolution import resolve_publish_caption
-from content_automation.publishing.publisher import PublishError, Publisher, PublishStatusResult
+from content_automation.publishing.instagram import media_requirements as instagram_requirements
+from content_automation.publishing.platforms import INSTAGRAM, PLATFORMS, PULL_URL, TIKTOK
+from content_automation.publishing.publisher import STATUS_READY_TO_FINALIZE, PublishError, Publisher, PublishStatusResult
+from content_automation.scheduling.finalization import finalize_ready_submission
+from content_automation.storage.signed_urls import SignedUrlUnsupportedError
 from content_automation.storage.local import StorageObjectNotFoundError
 from content_automation.storage.protocol import StorageProtocol
 from content_automation.storage.supabase_storage import StorageError
@@ -144,7 +154,7 @@ def _slot_scheduled_at(store: ContentStore, video: VideoRecord) -> str | None:
     return slot.scheduled_at if slot else None
 
 
-def _validate_ready_to_publish(store: ContentStore, video: VideoRecord, media_path: Path) -> None:
+def _validate_ready_to_publish(store: ContentStore, video: VideoRecord, media_path: Path, platform: str = TIKTOK) -> None:
     """media_path is the real local file to validate — either
     video.canonical_media_path directly (legacy/local-direct, unchanged
     pre-3.4 behavior) or a temp path materialized from object storage
@@ -175,11 +185,29 @@ def _validate_ready_to_publish(store: ContentStore, video: VideoRecord, media_pa
             ) from exc
         _persist_media_metadata(store, video, info)
     else:
-        info = media.MediaInfo(
-            path=media_path, container=video.container, video_codec=video.video_codec,
-            audio_codec=video.audio_codec, width=video.width, height=video.height, fps=video.fps,
-            duration_seconds=video.duration_seconds, file_size_bytes=video.file_size_bytes,
+        info = _stored_media_info(video, media_path)
+    _check_platform_requirements(video, info, platform)
+
+
+def _stored_media_info(video: VideoRecord, media_path: Path) -> media.MediaInfo:
+    """The video row's persisted inspection result as a MediaInfo."""
+    return media.MediaInfo(
+        path=media_path, container=video.container, video_codec=video.video_codec,
+        audio_codec=video.audio_codec, width=video.width, height=video.height, fps=video.fps,
+        duration_seconds=video.duration_seconds, file_size_bytes=video.file_size_bytes,
+    )
+
+
+def _check_platform_requirements(video: VideoRecord, info: media.MediaInfo, platform: str) -> None:
+    """Platform-specific media and caption limits (Milestone 4.2: Instagram
+    Reels have their own; TikTok's check is unchanged)."""
+    if platform == INSTAGRAM:
+        problem = instagram_requirements.check_reel_media(info) or instagram_requirements.check_caption(
+            resolve_publish_caption(video, INSTAGRAM)
         )
+        if problem is not None:
+            raise PublishTikTokError(f"Video {video.id}: {problem.message}", reason_code=problem.reason_code)
+        return
     compatible, reason = media.is_tiktok_compatible(info)
     if not compatible:
         raise PublishTikTokError(f"Video {video.id} is not TikTok-compatible: {reason}", reason_code="MEDIA_INCOMPATIBLE")
@@ -266,15 +294,27 @@ def _resolve_poll_outcome(status_result: PublishStatusResult) -> tuple[str, dict
     status_check_count) depends on each caller's own scheduling state, not
     on the status result alone."""
     if status_result.status == "PUBLISH_COMPLETE":
-        return "PUBLISHED", {"status": "PUBLISHED", "published_at": _now_iso()}
+        # Milestone 4.2: submission_state is cleared (a two-step platform may
+        # be confirmed here while its PUBLISH_REQUESTED checkpoint is set),
+        # and the media id is kept when the status check revealed one.
+        fields = {"status": "PUBLISHED", "published_at": _now_iso(), "submission_state": None}
+        if status_result.platform_media_id:
+            fields["platform_media_id"] = status_result.platform_media_id
+        return "PUBLISHED", fields
     if status_result.status == "FAILED":
         # failure_code (Milestone 3.11): the platform's own fail code when it
         # reported one — a machine label, mapped to a user-facing category by
-        # publishing/failure_taxonomy.py, never shown raw.
+        # publishing/failure_taxonomy.py, never shown raw. Milestone 4.2: a
+        # publisher may supply the label separately (failure_code).
         return "FAILED", {
             "status": "FAILED", "failure_reason": status_result.failure_reason,
-            "failure_code": status_result.failure_reason or "PLATFORM_REPORTED_FAILURE",
+            "failure_code": status_result.failure_code or status_result.failure_reason or "PLATFORM_REPORTED_FAILURE",
+            "submission_state": None,
         }
+    if status_result.status == STATUS_READY_TO_FINALIZE:
+        # Milestone 4.2: processed but not posted — the caller hands the row
+        # to scheduling/finalization.finalize_ready_submission.
+        return "READY", {}
     return "PROCESSING", {}
 
 
@@ -292,8 +332,13 @@ def _poll_and_update(store: ContentStore, record, publisher: Publisher) -> None:
         print(f"WARNING: could not fetch publish status: {exc}", file=sys.stderr)
         return
 
-    print(f"TikTok status: {status_result.status}")
+    print(f"{_label(record.platform)} status: {status_result.status}")
     outcome, fields = _resolve_poll_outcome(status_result)
+
+    if outcome == "READY":
+        result = finalize_ready_submission(store, record, publisher)
+        print(f"Finalize: {result}")
+        return
 
     if outcome == "PROCESSING":
         fields = {
@@ -309,7 +354,7 @@ def _poll_and_update(store: ContentStore, record, publisher: Publisher) -> None:
     if outcome == "PUBLISHED":
         print(f"Published. platform_post_id={record.platform_post_id}")
     else:
-        print(f"TikTok reported failure: {status_result.failure_reason}")
+        print(f"{_label(record.platform)} reported failure: {status_result.failure_reason}")
 
 
 @contextmanager
@@ -346,13 +391,27 @@ def _validate_and_submit(
     doesn't need to. See the module docstring's "Submission checkpoint"
     (Milestone 3.13) for the ordering guarantees."""
     try:
-        _validate_ready_to_publish(store, video, media_path)
+        _validate_ready_to_publish(store, video, media_path, record.platform)
     except PublishTikTokError as exc:
-        store.update_platform_post(
-            record.id, updated_at=_now_iso(), status="FAILED", failure_reason=str(exc), failure_code=exc.reason_code,
-        )
+        _mark_precondition_failed(store, record, exc)
         raise
+    _submit(store, video, record, media_path, publisher)
 
+
+def _mark_precondition_failed(store: ContentStore, record: PlatformPostRecord, exc: PublishTikTokError) -> None:
+    store.update_platform_post(
+        record.id, updated_at=_now_iso(), status="FAILED", failure_reason=str(exc), failure_code=exc.reason_code,
+    )
+
+
+def _submit(
+    store: ContentStore, video: VideoRecord, record: PlatformPostRecord, media_path: Path, publisher: Publisher,
+    media_url: Callable[[], str] | None = None,
+) -> None:
+    """Checkpoint -> submit -> persist -> poll (Milestone 3.13 ordering).
+    media_url (Milestone 4.2, pull-URL platforms only) issues the short-lived
+    signed URL; it's called after the checkpoint and immediately before
+    publisher.publish(), and the URL itself is never logged or stored."""
     checkpointed = bool(getattr(publisher, "reports_platform_post_id_before_media_transfer", False))
     store.update_platform_post(
         record.id, updated_at=_now_iso(), submission_state=AWAITING_PLATFORM_ID if checkpointed else SUBMITTING,
@@ -367,12 +426,13 @@ def _validate_and_submit(
             submission_state=None,
         )
 
-    caption = resolve_publish_caption(video, "tiktok")
+    caption = resolve_publish_caption(video, record.platform)
     try:
+        extra = {"media_url": _issue_media_url(media_url)} if media_url is not None else {}
         if checkpointed:
-            result = publisher.publish(media_path, caption, on_platform_post_id=persist_platform_post_id)
+            result = publisher.publish(media_path, caption, on_platform_post_id=persist_platform_post_id, **extra)
         else:
-            result = publisher.publish(media_path, caption)
+            result = publisher.publish(media_path, caption, **extra)
     except PublishError as exc:
         current = store.get_platform_post(video.id, record.platform)
         if current is not None and current.platform_post_id:
@@ -401,7 +461,7 @@ def _validate_and_submit(
         # still safe from here on: the next run sees platform_post_id set
         # and only polls, never resubmits.
         persist_platform_post_id(result.platform_post_id)
-    print(f"Submitted to TikTok: publish_id={result.platform_post_id}")
+    print(f"Submitted to {_label(record.platform)}: publish_id={result.platform_post_id}")
 
     refreshed = store.get_platform_post(video.id, record.platform)
     _poll_and_update(store, refreshed, publisher)
@@ -474,6 +534,10 @@ def execute_claimed_platform_post(
         )
         raise exc
 
+    if platform in PLATFORMS and PLATFORMS[platform].media_delivery == PULL_URL:
+        _execute_pull_url_post(store, video, record, publisher, storage)
+        return
+
     with ExitStack() as stack:
         try:
             media_path = stack.enter_context(_resolved_media_path(store, video, storage))
@@ -490,6 +554,64 @@ def execute_claimed_platform_post(
 
 
 _MATERIALIZATION_ERRORS = (StorageError, StorageObjectNotFoundError, MediaNotUploadedError, MediaOwnershipError)
+
+
+def _execute_pull_url_post(
+    store: ContentStore, video: VideoRecord, record: PlatformPostRecord, publisher: Publisher,
+    storage: StorageProtocol | None,
+) -> None:
+    """Milestone 4.2: a platform that fetches the video itself (Instagram).
+    The canonical object stays private; the platform gets a short-lived
+    signed URL issued just before submission. The file is downloaded only
+    when it has never been inspected (to probe it); otherwise the stored
+    metadata is validated without touching the bytes."""
+    if not video.storage_provider or not video.storage_key or storage is None:
+        exc = PublishTikTokError(
+            f"video {video.id} isn't in object storage, which {_label(record.platform)} needs to fetch it from.",
+            reason_code="STORAGE_UNAVAILABLE",
+        )
+        _mark_precondition_failed(store, record, exc)
+        raise exc
+
+    if video.container is None:
+        try:
+            with _resolved_media_path(store, video, storage) as media_path:
+                try:
+                    _validate_ready_to_publish(store, video, media_path, record.platform)
+                except PublishTikTokError as exc:
+                    _mark_precondition_failed(store, record, exc)
+                    raise
+        except _MATERIALIZATION_ERRORS as exc:
+            error = _materialization_publish_error(exc)
+            _schedule_retry_or_fail(store, record, error)
+            raise PublishTikTokError(f"Could not load media for video {video.id}: {error}") from exc
+        video = store.get_video(video.id)
+    else:
+        try:
+            _check_platform_requirements(video, _stored_media_info(video, Path(video.storage_key)), record.platform)
+        except PublishTikTokError as exc:
+            _mark_precondition_failed(store, record, exc)
+            raise
+
+    _submit(
+        store, video, record, Path(video.storage_key), publisher,
+        media_url=lambda: storage.create_signed_url(video.storage_key, INSTAGRAM_MEDIA_URL_TTL_SECONDS),
+    )
+
+
+def _issue_media_url(issue: Callable[[], str]) -> str:
+    """Issue the signed URL, translating storage failures into the
+    pre-submission PublishError shapes the retry classifier understands."""
+    try:
+        return issue()
+    except SignedUrlUnsupportedError as exc:
+        raise PublishError(str(exc), reason_code="STORAGE_UNAVAILABLE") from None
+    except _MATERIALIZATION_ERRORS as exc:
+        raise _materialization_publish_error(exc) from None
+
+
+def _label(platform: str) -> str:
+    return PLATFORMS[platform].label if platform in PLATFORMS else platform
 
 
 def _materialization_publish_error(exc: Exception) -> PublishError:

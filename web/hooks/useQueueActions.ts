@@ -45,8 +45,13 @@ export function useQueueActions() {
   }
 
   return {
-    assign: (slotId: number, videoId: number) => slotChange(assignVideoToSlot(accessToken, slotId, videoId)),
-    assignNext: (videoId: number) => slotChange(assignNextOpenSlot(accessToken, videoId)),
+    /** platforms (Milestone 4.2): where to publish; omitted keeps the server default. */
+    assign: (slotId: number, videoId: number, platforms?: string[]) =>
+      slotChange(
+        platforms ? assignVideoToSlot(accessToken, slotId, videoId, platforms) : assignVideoToSlot(accessToken, slotId, videoId),
+      ),
+    assignNext: (videoId: number, platforms?: string[]) =>
+      slotChange(platforms ? assignNextOpenSlot(accessToken, videoId, platforms) : assignNextOpenSlot(accessToken, videoId)),
     unassign: (slotId: number) => slotChange(unassignSlot(accessToken, slotId)),
     retry: (slotId: number, confirmNotPublished: boolean) =>
       slotChange(retrySlotPublication(accessToken, slotId, { confirmNotPublished })),

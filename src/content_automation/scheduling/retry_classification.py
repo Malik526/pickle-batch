@@ -55,6 +55,15 @@ _RETRYABLE_REASON_CODES = frozenset({
     # lock past the timeout (publishing/tiktok/credential_store.py) — it
     # will have finished by the next attempt.
     "CREDENTIAL_REFRESH_BUSY",
+    # Milestone 4.2 (publishing/instagram/content_publishing.py): Meta hasn't
+    # finished processing the container yet; a temporary/transient Meta
+    # error; Meta couldn't fetch the signed media URL (a fresh URL is issued
+    # on every attempt); the account's API publishing limit — a few spaced
+    # retries before the post is marked FAILED.
+    "INSTAGRAM_MEDIA_NOT_READY",
+    "INSTAGRAM_TRANSIENT_ERROR",
+    "INSTAGRAM_MEDIA_FETCH_FAILED",
+    "INSTAGRAM_RATE_LIMITED",
 })
 
 # Always terminal regardless of http_status — local validation, account/
@@ -78,6 +87,18 @@ _TERMINAL_REASON_CODES = frozenset({
     # carry a 4xx http_status that would otherwise route through the same
     # fallback path other unrecognized codes use.
     "REAUTHORIZATION_REQUIRED",
+    # Milestone 4.2: Meta rejected the request for a reason time won't fix,
+    # and the Instagram Reels media/caption checks
+    # (publishing/instagram/media_requirements.py).
+    "INSTAGRAM_REQUEST_REJECTED",
+    "INSTAGRAM_MEDIA_UNSUPPORTED_FORMAT",
+    "INSTAGRAM_MEDIA_UNSUPPORTED_CODEC",
+    "INSTAGRAM_MEDIA_DURATION",
+    "INSTAGRAM_MEDIA_FRAME_RATE",
+    "INSTAGRAM_MEDIA_TOO_LARGE",
+    "INSTAGRAM_MEDIA_RESOLUTION",
+    "INSTAGRAM_CAPTION_TOO_MANY_HASHTAGS",
+    "INSTAGRAM_CAPTION_TOO_MANY_MENTIONS",
 })
 
 

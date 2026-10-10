@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { QueueCalendarMonth } from "@/components/app/QueueCalendarMonth";
 import { QueueList } from "@/components/app/QueueList";
+import { PlatformPicker } from "@/components/app/PlatformPicker";
 import { QueueSlotCard } from "@/components/app/QueueSlotCard";
 import { Card } from "@/components/ui/Card";
 import { ErrorState } from "@/components/ui/ErrorState";
@@ -11,6 +12,9 @@ import { useQueueActions } from "@/hooks/useQueueActions";
 import { useQueueSlots } from "@/hooks/useQueueSlots";
 import { useVideos } from "@/hooks/useVideos";
 import { ApiError } from "@/lib/api/client";
+import { useInstagramConnection } from "@/hooks/useInstagramConnection";
+import { useTikTokConnection } from "@/hooks/useTikTokConnection";
+import { PlatformId } from "@/lib/domain/publishing";
 import { usePersistentUiState } from "@/lib/ui-state";
 
 function pad(n: number): string {
@@ -69,6 +73,11 @@ function monthWindow(monthCursor: Date): { from: string; to: string } {
  * month changes keep the current slots on screen while fresh data loads;
  * a failed background refresh shows a Retry notice above them. The
  * list/calendar choice and the displayed month survive navigation.
+ *
+ * Milestone 4.2: with Instagram connected, a "Publish to" picker
+ * (PlatformPicker) chooses the platforms each newly scheduled video goes to;
+ * the choice survives navigation. Without Instagram, assignment sends no
+ * platforms and the server keeps its default, exactly as before.
  */
 export function QueueBoard() {
   const [viewMode, setViewMode] = usePersistentUiState<"list" | "calendar">("queue.viewMode", "list");
@@ -85,6 +94,20 @@ export function QueueBoard() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const unassignedVideos = videos.filter((video) => video.assigned_slot_id === null);
+
+  // Milestone 4.2: once Instagram is connected the user chooses where each
+  // scheduled video goes; until then nothing changes (server default).
+  const tiktokConnected = useTikTokConnection().data?.connected ?? false;
+  const instagramConnected = useInstagramConnection().data?.connected ?? false;
+  const platformOptions = [
+    ...(tiktokConnected ? [{ id: PlatformId.TIKTOK, label: "TikTok" }] : []),
+    { id: PlatformId.INSTAGRAM, label: "Instagram" },
+  ];
+  const [chosenPlatforms, setChosenPlatforms] = usePersistentUiState<string[]>("queue.platforms", [PlatformId.TIKTOK]);
+  const platformChoice = instagramConnected
+    ? chosenPlatforms.filter((id) => platformOptions.some((option) => option.id === id))
+    : undefined;
+  const nothingChosen = platformChoice !== undefined && platformChoice.length === 0;
   const selectedSlot = slots?.find((slot) => slot.id === selectedSlotId) ?? null;
 
   function retryLoad() {
@@ -96,7 +119,7 @@ export function QueueBoard() {
     setActionError(null);
     setBusySlotId(slotId);
     try {
-      await actions.assign(slotId, videoId);
+      await actions.assign(slotId, videoId, platformChoice);
     } catch (error) {
       setActionError(error instanceof ApiError ? error.message : "Could not assign that video.");
     } finally {
@@ -108,7 +131,7 @@ export function QueueBoard() {
     setActionError(null);
     setBusyVideoId(videoId);
     try {
-      await actions.assignNext(videoId);
+      await actions.assignNext(videoId, platformChoice);
     } catch (error) {
       setActionError(error instanceof ApiError ? error.message : "Could not assign that video to the next open slot.");
     } finally {
@@ -174,6 +197,12 @@ export function QueueBoard() {
         <h3 id="unscheduled-videos-heading" className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-muted">
           Unscheduled videos
         </h3>
+        {platformChoice !== undefined ? (
+          <div className="mb-3">
+            <PlatformPicker options={platformOptions} selected={platformChoice} onChange={setChosenPlatforms} />
+            {nothingChosen ? <p className="mt-1 text-xs text-status-danger">Choose at least one platform.</p> : null}
+          </div>
+        ) : null}
         {unassignedVideos.length === 0 ? (
           <p className="text-sm text-ink-muted">No unscheduled videos — upload one in Library.</p>
         ) : (
@@ -183,7 +212,7 @@ export function QueueBoard() {
                 <p className="truncate text-sm text-ink">{video.original_filename}</p>
                 <button
                   type="button"
-                  disabled={busyVideoId === video.id}
+                  disabled={busyVideoId === video.id || nothingChosen}
                   onClick={() => void handleAssignNext(video.id)}
                   className="tap-target shrink-0 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-ink hover:border-accent/40 hover:text-accent disabled:opacity-60"
                 >

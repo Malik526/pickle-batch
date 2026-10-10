@@ -81,6 +81,7 @@ from content_automation.persistence.content_store import ContentStore
 from content_automation.publishing.publisher import PublishError, Publisher
 from content_automation.scheduling import retry_classification
 from content_automation.scheduling.publish_tiktok import _next_status_check_at, _resolve_poll_outcome
+from content_automation.scheduling.finalization import finalize_ready_submission
 from content_automation.scheduling.worker import log_event
 
 
@@ -174,6 +175,19 @@ def reconcile_pending_status_checks_once(
             continue
 
         outcome, fields = _resolve_poll_outcome(status_result)
+
+        if outcome == "READY":
+            # Milestone 4.2: processed, not yet posted — finalization owns
+            # the posting step and its duplicate-prevention rules.
+            result = finalize_ready_submission(store, record, publisher, now=now, user_id=user_id)
+            if result == "PUBLISHED":
+                summary.published += 1
+            elif result == "UNKNOWN":
+                summary.unknown += 1
+            elif result == "WAITING":
+                summary.still_processing += 1
+            log_event(f"{record.platform}_reconciliation", **ids, outcome=result)
+            continue
 
         if outcome == "PROCESSING":
             if record.status_check_count + 1 >= STATUS_CHECK_MAX_ATTEMPTS:

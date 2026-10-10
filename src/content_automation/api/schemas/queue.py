@@ -32,6 +32,9 @@ class PublicationStatusResponse(BaseModel):
     reason_code: str | None
     message: str | None
     action_hint: str | None
+    # Milestone 4.2: "PROCESSING" / "PUBLISHING" for a two-step platform
+    # (Instagram) while PUBLISHING; null otherwise.
+    stage: str | None = None
 
 
 class QueueSlotResponse(BaseModel):
@@ -69,10 +72,15 @@ class QueueSlotListResponse(BaseModel):
 
 class AssignToSlotRequest(BaseModel):
     video_id: int
+    # Milestone 4.2: which platforms to publish this video to. Omitted (or
+    # null) keeps the configured default (TikTok). Each listed platform must
+    # be publishable and connected — see scheduling/queue_assignment.py.
+    platforms: list[str] | None = None
 
 
 class AssignNextRequest(BaseModel):
     video_id: int
+    platforms: list[str] | None = None
 
 
 class RetryPublishRequest(BaseModel):

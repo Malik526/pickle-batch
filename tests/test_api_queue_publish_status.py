@@ -86,6 +86,7 @@ def test_scheduled_slot_shape(client, users, db_path):
     assert slot["publications"] == [{
         "platform": "tiktok", "display_status": "SCHEDULED", "platform_post_status": "PENDING",
         "published_at": None, "reason_code": None, "message": None, "action_hint": None,
+        "stage": None,  # Milestone 4.2: only set for Instagram while PUBLISHING
     }]
 
 

@@ -16,6 +16,14 @@ from content_automation.persistence.content_store import ContentStore
 NOW = "2026-10-04T00:00:00+00:00"
 
 
+@pytest.fixture(autouse=True)
+def instagram_unconfigured(monkeypatch):
+    """Tests decide whether Instagram is configured; the developer's .env
+    must not (it made connect_available depend on the machine)."""
+    for name in ("INSTAGRAM_APP_ID", "INSTAGRAM_APP_SECRET", "INSTAGRAM_REDIRECT_URI"):
+        monkeypatch.setattr(config, name, "")
+
+
 @pytest.fixture
 def db_path(tmp_path):
     return tmp_path / "test.db"

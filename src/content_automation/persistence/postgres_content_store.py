@@ -40,6 +40,7 @@ Dependencies:
 """
 
 from contextlib import contextmanager
+import dataclasses
 from datetime import date, datetime
 from typing import Any
 
@@ -100,48 +101,63 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _record(cls, row: dict[str, Any]):
+    """Build a record from a SELECT * row, ignoring columns the dataclass
+    doesn't declare (Milestone 4.2). Without this, an additive migration
+    applied by a newer deployment (e.g. 0012's platform_posts.platform_media_id)
+    made every read in still-running older code raise TypeError until it was
+    redeployed. Only unknown extras are dropped; a missing column still fails."""
+    known = _FIELD_NAMES.get(cls)
+    if known is None:
+        known = _FIELD_NAMES[cls] = frozenset(field.name for field in dataclasses.fields(cls))
+    return cls(**{key: value for key, value in _normalize_row(row).items() if key in known})
+
+
+_FIELD_NAMES: dict[type, frozenset[str]] = {}
+
+
 def _row_to_video(row: dict) -> VideoRecord:
-    return VideoRecord(**_normalize_row(row))
+    return _record(VideoRecord, row)
 
 
 def _row_to_slot(row: dict) -> SlotRecord:
-    return SlotRecord(**_normalize_row(row))
+    return _record(SlotRecord, row)
 
 
 def _row_to_platform_post(row: dict) -> PlatformPostRecord:
-    return PlatformPostRecord(**_normalize_row(row))
+    return _record(PlatformPostRecord, row)
 
 
 def _row_to_user(row: dict) -> UserRecord:
-    return UserRecord(**_normalize_row(row))
+    return _record(UserRecord, row)
 
 
 def _row_to_auth_identity(row: dict) -> AuthIdentityRecord:
-    return AuthIdentityRecord(**_normalize_row(row))
+    return _record(AuthIdentityRecord, row)
 
 
 def _row_to_platform_credential(row: dict) -> PlatformCredentialRecord:
-    return PlatformCredentialRecord(**_normalize_row(row))
+    return _record(PlatformCredentialRecord, row)
 
 
 def _row_to_oauth_state(row: dict) -> OAuthStateRecord:
-    return OAuthStateRecord(**_normalize_row(row))
+    return _record(OAuthStateRecord, row)
 
 
 def _row_to_platform_connection(row: dict) -> PlatformConnectionRecord:
-    return PlatformConnectionRecord(**_normalize_row(row))
+    return _record(PlatformConnectionRecord, row)
 
 
 def _row_to_upload_batch(row: dict) -> UploadBatchRecord:
-    return UploadBatchRecord(**_normalize_row(row))
+    return _record(UploadBatchRecord, row)
 
 
 def _row_to_upload_attempt(row: dict) -> UploadAttemptRecord:
-    return UploadAttemptRecord(**_normalize_row(row))
+    return _record(UploadAttemptRecord, row)
 
 
 def _row_to_cadence_time(row: dict) -> CadenceTimeRecord:
-    return CadenceTimeRecord(**_normalize_row(row))
+    return _record(CadenceTimeRecord, row)
 
 
 def _connect(dsn: str, schema: str) -> psycopg.Connection:

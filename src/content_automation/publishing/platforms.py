@@ -23,10 +23,9 @@ What it does:
 
   Instagram's connection_available became True in Milestone 4.1 (the OAuth
   connect flow exists; the status endpoint still reports connect_available
-  False unless the server is configured for it). publishing_available stays
-  False until Milestone 4.2 (Reels publishing), so no Instagram
-  platform_posts rows are created. See
-  docs/decisions/0018-instagram-integration-architecture.md.
+  False unless the server is configured for it) and publishing_available in
+  Milestone 4.2 (Reels publishing through publishing/instagram/publisher.py).
+  See docs/decisions/0018-instagram-integration-architecture.md.
 
 Dependencies:
   stdlib only.
@@ -59,7 +58,7 @@ PLATFORMS: dict[str, PlatformCapabilities] = {
     ),
     INSTAGRAM: PlatformCapabilities(
         id=INSTAGRAM, label="Instagram", media_delivery=PULL_URL, requires_finalize_step=True,
-        caption_max_chars=2200, connection_available=True, publishing_available=False,
+        caption_max_chars=2200, connection_available=True, publishing_available=True,
     ),
 }
 

@@ -58,6 +58,8 @@ from content_automation.config import (
     WORKER_POLL_INTERVAL_SECONDS,
 )
 from content_automation.persistence.protocol import ContentStoreProtocol
+from content_automation.publishing.instagram.publisher import build_hosted_instagram_publisher
+from content_automation.publishing.platforms import INSTAGRAM, PLATFORMS, TIKTOK
 from content_automation.publishing.publisher import Publisher
 from content_automation.publishing.tiktok.hosted_publisher import build_hosted_tiktok_publisher
 from content_automation.scheduling.crash_recovery import recover_stale_posts_once
@@ -68,7 +70,9 @@ from content_automation.storage.protocol import StorageProtocol
 
 logger = logging.getLogger(__name__)
 
-PLATFORM = "tiktok"
+# Kept for importers from before Milestone 4.2; dispatch now covers every
+# platform in default_publisher_factories().
+PLATFORM = TIKTOK
 
 
 @dataclass
@@ -89,65 +93,95 @@ class HostedCycleSummary:
         return any((self.claimed, self.recovered, self.reconciled, self.unknown, self.user_errors))
 
 
+def default_publisher_factories(
+    tiktok_factory: Callable[[ContentStoreProtocol, int], Publisher] = build_hosted_tiktok_publisher,
+) -> dict[str, Callable[[ContentStoreProtocol, int], Publisher]]:
+    """Milestone 4.2: one hosted Publisher factory per platform. Dispatch is
+    by platform_posts.platform; a platform runs only while the registry
+    (publishing/platforms.py) marks it publishing_available."""
+    return {TIKTOK: tiktok_factory, INSTAGRAM: build_hosted_instagram_publisher}
+
+
 def run_hosted_cycle(
     store: ContentStoreProtocol,
     storage: StorageProtocol,
     *,
     now_utc: datetime | None = None,
     publisher_factory: Callable[[ContentStoreProtocol, int], Publisher] = build_hosted_tiktok_publisher,
+    publisher_factories: dict[str, Callable[[ContentStoreProtocol, int], Publisher]] | None = None,
     dry_run: bool = False,
 ) -> HostedCycleSummary:
+    """One cycle over every platform with a hosted publisher (Milestone 4.2;
+    before that TikTok only). publisher_factory is TikTok's factory, kept for
+    existing callers; publisher_factories replaces the whole mapping."""
     now_utc = now_utc or datetime.now(timezone.utc)
     summary = HostedCycleSummary()
+    factories = publisher_factories if publisher_factories is not None else default_publisher_factories(publisher_factory)
+    users_seen: set[int] = set()
 
-    for user_id in store.list_hosted_user_ids_with_platform_work(PLATFORM):
-        summary.users += 1
-        try:
-            due_posts = get_hosted_due_posts(store, PLATFORM, user_id, now_utc)
-            summary.due += len(due_posts)
-            _log_due_backlog(store, user_id, due_posts, now_utc)
-            if dry_run:
-                for post in due_posts:
-                    log_event("dry_run_would_claim", platform_post_row_id=post.id, video_id=post.video_id,
-                              platform=post.platform, scheduled_at=post.scheduled_at, user_id=user_id,
-                              lateness_seconds=lateness_seconds(store, post, now_utc))
-                continue
-
-            publisher = publisher_factory(store, user_id)
-
-            recovery = recover_stale_posts_once(store, publisher, platform=PLATFORM, now=now_utc, user_id=user_id)
-            summary.recovered += recovery.requeued + recovery.retry_scheduled + recovery.published + recovery.failed
-
-            reconciliation = reconcile_pending_status_checks_once(
-                store, publisher, platform=PLATFORM, now=now_utc, user_id=user_id,
-            )
-            summary.reconciled += reconciliation.published + reconciliation.failed
-            summary.unknown += recovery.unknown + reconciliation.unknown
-
-            # Recovery may have requeued a stale claim; re-select so it can
-            # run this cycle rather than waiting for the next one. (A
-            # retry_scheduled row waits for its backoff, so it isn't due yet.)
-            if recovery.requeued:
-                due_posts = get_hosted_due_posts(store, PLATFORM, user_id, now_utc)
-
-            run = run_due_posts_once(
-                store, publisher, platform=PLATFORM, user_id=user_id, storage=storage, due_posts=due_posts,
-                lateness_seconds=lambda post: lateness_seconds(store, post, datetime.now(timezone.utc)),
-            )
-            summary.claimed += run.claimed
-            summary.published += run.published
-            summary.failed += run.failed
-            summary.retry_scheduled += run.retry_scheduled
-        except Exception as exc:  # noqa: BLE001 — isolate users; the loop must keep running
-            summary.user_errors.append(user_id)
-            # Type only: exception text can embed platform/storage response bodies.
-            log_event("user_cycle_error", user_id=user_id, error_type=type(exc).__name__)
-            logger.debug("user cycle error detail", exc_info=True)
+    for platform, factory in factories.items():
+        if platform not in PLATFORMS or not PLATFORMS[platform].publishing_available:
+            continue
+        for user_id in store.list_hosted_user_ids_with_platform_work(platform):
+            if user_id not in users_seen:
+                users_seen.add(user_id)
+                summary.users += 1
+            _run_user_platform(store, storage, summary, platform, factory, user_id, now_utc, dry_run)
 
     return summary
 
 
-def _log_due_backlog(store: ContentStoreProtocol, user_id: int, due_posts, now_utc: datetime) -> None:
+def _run_user_platform(store, storage, summary: HostedCycleSummary, platform: str, factory, user_id: int,
+                       now_utc: datetime, dry_run: bool) -> None:
+    """Crash recovery → reconciliation → due posts for one user on one
+    platform. Errors are isolated per (user, platform), so a failure on one
+    platform never stops that user's posts on another."""
+    try:
+        due_posts = get_hosted_due_posts(store, platform, user_id, now_utc)
+        summary.due += len(due_posts)
+        _log_due_backlog(store, user_id, due_posts, now_utc, platform)
+        if dry_run:
+            for post in due_posts:
+                log_event("dry_run_would_claim", platform_post_row_id=post.id, video_id=post.video_id,
+                          platform=post.platform, scheduled_at=post.scheduled_at, user_id=user_id,
+                          lateness_seconds=lateness_seconds(store, post, now_utc))
+            return
+
+        publisher = factory(store, user_id)
+
+        recovery = recover_stale_posts_once(store, publisher, platform=platform, now=now_utc, user_id=user_id)
+        summary.recovered += recovery.requeued + recovery.retry_scheduled + recovery.published + recovery.failed
+
+        reconciliation = reconcile_pending_status_checks_once(
+            store, publisher, platform=platform, now=now_utc, user_id=user_id,
+        )
+        summary.reconciled += reconciliation.published + reconciliation.failed
+        summary.unknown += recovery.unknown + reconciliation.unknown
+
+        # Recovery may have requeued a stale claim; re-select so it can
+        # run this cycle rather than waiting for the next one. (A
+        # retry_scheduled row waits for its backoff, so it isn't due yet.)
+        if recovery.requeued:
+            due_posts = get_hosted_due_posts(store, platform, user_id, now_utc)
+
+        run = run_due_posts_once(
+            store, publisher, platform=platform, user_id=user_id, storage=storage, due_posts=due_posts,
+            lateness_seconds=lambda post: lateness_seconds(store, post, datetime.now(timezone.utc)),
+        )
+        summary.claimed += run.claimed
+        summary.published += run.published
+        summary.failed += run.failed
+        summary.retry_scheduled += run.retry_scheduled
+    except Exception as exc:  # noqa: BLE001 — isolate users; the loop must keep running
+        if user_id not in summary.user_errors:
+            summary.user_errors.append(user_id)
+        # Type only: exception text can embed platform/storage response bodies.
+        log_event("user_cycle_error", user_id=user_id, platform=platform, error_type=type(exc).__name__)
+        logger.debug("user cycle error detail", exc_info=True)
+
+
+def _log_due_backlog(store: ContentStoreProtocol, user_id: int, due_posts, now_utc: datetime,
+                     platform: str = "tiktok") -> None:
     """Milestone 3.14 follow-up (overdue telemetry): one event per user per
     cycle with due work. overdue = due posts more than one poll interval
     late, i.e. ones a healthy, continuously running worker would already
@@ -157,7 +191,7 @@ def _log_due_backlog(store: ContentStoreProtocol, user_id: int, due_posts, now_u
         return
     lateness = [lateness_seconds(store, post, now_utc) for post in due_posts]
     log_event(
-        "due_backlog", user_id=user_id, platform=PLATFORM, due=len(due_posts),
+        "due_backlog", user_id=user_id, platform=platform, due=len(due_posts),
         overdue=sum(1 for seconds in lateness if seconds > WORKER_POLL_INTERVAL_SECONDS),
         max_lateness_seconds=max(lateness),
     )
@@ -208,7 +242,7 @@ def worker_prerequisite_problems() -> list[str]:
     if STORAGE_BACKEND != "supabase":
         problems.append(f"STORAGE_BACKEND is {STORAGE_BACKEND!r}, expected 'supabase'")
     if not CREDENTIAL_ENCRYPTION_KEY:
-        problems.append("CREDENTIAL_ENCRYPTION_KEY is not set (hosted TikTok credentials can't be decrypted)")
+        problems.append("CREDENTIAL_ENCRYPTION_KEY is not set (hosted platform credentials can't be decrypted)")
     if shutil.which("ffprobe") is None:
         problems.append("ffprobe is not on PATH (install ffmpeg in the worker image)")
     return problems

@@ -19,16 +19,24 @@ export function listQueueSlots(accessToken: string | null, fromIso: string, toIs
 }
 
 /** Manual assignment: claim a specific OPEN slot for a specific owned video. */
-export function assignVideoToSlot(accessToken: string | null, slotId: number, videoId: number): Promise<QueueSlotResponse> {
+/** Milestone 4.2: `platforms` chooses where to publish; omitted keeps the
+ * server's default (TikTok). Sent only when given. */
+function assignBody(videoId: number, platforms?: string[]) {
+  return platforms ? { video_id: videoId, platforms } : { video_id: videoId };
+}
+
+export function assignVideoToSlot(
+  accessToken: string | null, slotId: number, videoId: number, platforms?: string[],
+): Promise<QueueSlotResponse> {
   return apiRequest<QueueSlotResponse>(`/api/queue/slots/${slotId}/assign`, {
-    method: "POST", body: { video_id: videoId }, accessToken,
+    method: "POST", body: assignBody(videoId, platforms), accessToken,
   });
 }
 
 /** Automatic/FIFO assignment: claim the caller's earliest eligible OPEN slot. */
-export function assignNextOpenSlot(accessToken: string | null, videoId: number): Promise<QueueSlotResponse> {
+export function assignNextOpenSlot(accessToken: string | null, videoId: number, platforms?: string[]): Promise<QueueSlotResponse> {
   return apiRequest<QueueSlotResponse>("/api/queue/assign-next", {
-    method: "POST", body: { video_id: videoId }, accessToken,
+    method: "POST", body: assignBody(videoId, platforms), accessToken,
   });
 }
 

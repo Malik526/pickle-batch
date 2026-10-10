@@ -336,3 +336,57 @@ def test_removing_from_schedule_then_deleting_the_video_succeeds(client, users, 
     allowed = client.delete(f"/api/videos/{video_id}")
 
     assert allowed.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# Milestone 4.2: choosing platforms when assigning
+# ---------------------------------------------------------------------------
+
+def _connect(db_path, user, platform):
+    with ContentStore(db_path=db_path) as store:
+        store.get_or_create_platform_connection(user.id, platform, external_account_id=f"{platform}-{user.id}")
+
+
+def _platforms_for(db_path, video_id):
+    with ContentStore(db_path=db_path) as store:
+        return sorted(p for p in ("tiktok", "instagram") if store.get_platform_post(video_id, p) is not None)
+
+
+def test_assigning_to_instagram_only_creates_just_an_instagram_post(client, users, db_path):
+    user_a, _ = users
+    _connect(db_path, user_a, "instagram")
+    slot_id, video_id = _open_slot(db_path, user_a, "2099-01-05T09:00:00"), _video(db_path, user_a)
+    _act_as(user_a)
+    response = client.post(f"/api/queue/slots/{slot_id}/assign", json={"video_id": video_id, "platforms": ["instagram"]})
+    assert response.status_code == 200
+    assert _platforms_for(db_path, video_id) == ["instagram"]
+    assert [p["platform"] for p in response.json()["publications"]] == ["instagram"]
+
+
+def test_omitting_platforms_keeps_the_default(client, users, db_path):
+    user_a, _ = users
+    slot_id, video_id = _open_slot(db_path, user_a, "2099-01-05T09:00:00"), _video(db_path, user_a)
+    _act_as(user_a)
+    assert client.post(f"/api/queue/slots/{slot_id}/assign", json={"video_id": video_id}).status_code == 200
+    assert _platforms_for(db_path, video_id) == ["tiktok"]
+
+
+def test_assigning_to_an_unconnected_platform_is_refused_and_changes_nothing(client, users, db_path):
+    user_a, user_b = users
+    _connect(db_path, user_b, "instagram")  # someone else's connection doesn't count
+    slot_id, video_id = _open_slot(db_path, user_a, "2099-01-05T09:00:00"), _video(db_path, user_a)
+    _act_as(user_a)
+    response = client.post(f"/api/queue/assign-next", json={"video_id": video_id, "platforms": ["instagram"]})
+    assert response.status_code == 409 and "Connect Instagram" in response.json()["detail"]
+    response = client.post(f"/api/queue/slots/{slot_id}/assign", json={"video_id": video_id, "platforms": ["instagram"]})
+    assert response.status_code == 409
+    assert _platforms_for(db_path, video_id) == []
+
+
+def test_unknown_or_empty_platform_choices_are_bad_requests(client, users, db_path):
+    user_a, _ = users
+    slot_id, video_id = _open_slot(db_path, user_a, "2099-01-05T09:00:00"), _video(db_path, user_a)
+    _act_as(user_a)
+    for platforms in (["myspace"], []):
+        response = client.post(f"/api/queue/slots/{slot_id}/assign", json={"video_id": video_id, "platforms": platforms})
+        assert response.status_code == 400

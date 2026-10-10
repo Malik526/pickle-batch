@@ -99,6 +99,29 @@ _ATTENTION_MESSAGES = {
     "OUTCOME_UNKNOWN": "We couldn't confirm whether this was published.",
 }
 
+# Milestone 4.2: platform_posts.submission_state while a two-step platform's
+# posting call may be in flight. The one definition: scheduling/finalization.py
+# (which writes it) and scheduling/manual_recovery.py import it from here.
+PUBLISH_REQUESTED = "PUBLISH_REQUESTED"
+
+
+def _publishing_stage(post: PlatformPostRecord) -> str | None:
+    if post.platform != "instagram" or not post.platform_post_id:
+        return None
+    return "PUBLISHING" if post.submission_state == PUBLISH_REQUESTED else "PROCESSING"
+
+
+def _publishing_message(post: PlatformPostRecord) -> str:
+    """Milestone 4.2: Instagram's two steps read differently — Meta is
+    processing the uploaded container, or the post itself is being made."""
+    label = platform_label(post.platform)
+    if post.platform == "instagram" and post.platform_post_id:
+        if post.submission_state == PUBLISH_REQUESTED:
+            return f"Publishing to {label}…"
+        return f"{label} is processing the video…"
+    return f"Sending to {label}…"
+
+
 # Milestone 3.13 — the statuses the manual retry API accepts.
 RETRYABLE_POST_STATUSES = ("FAILED", "UNKNOWN")
 
@@ -108,9 +131,13 @@ def post_can_retry(post: PlatformPostRecord) -> bool:
 
 
 def post_retry_requires_confirmation(post: PlatformPostRecord) -> bool:
-    """Retrying could duplicate a post that may already exist, and there is
-    no platform id to check first."""
-    return post.status == "UNKNOWN" and post.platform_post_id is None
+    """Retrying could duplicate a post that may already exist: there is no
+    platform id to check first, or (Milestone 4.2) a publish request for a
+    two-step platform may have gone through (submission_state
+    PUBLISH_REQUESTED — see scheduling/finalization.py)."""
+    if post.status != "UNKNOWN":
+        return False
+    return post.platform_post_id is None or post.submission_state == PUBLISH_REQUESTED
 
 
 @dataclass(frozen=True)
@@ -123,6 +150,10 @@ class PublicationStatus:
     reason_code: str | None = None
     message: str | None = None
     action_hint: str | None = None
+    # Milestone 4.2: for a PUBLISHING post on a two-step platform, which step
+    # it's in — "PROCESSING" (the platform is processing the upload) or
+    # "PUBLISHING" (the post itself is being made). None otherwise.
+    stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +227,7 @@ def resolve_publication_status(
                 return _attention(post, "PUBLISH_UNCONFIRMED")
         return PublicationStatus(
             platform=post.platform, display_status=PUBLISHING, platform_post_status=post.status, published_at=None,
-            message=f"Sending to {platform_label(post.platform)}…",
+            message=_publishing_message(post), stage=_publishing_stage(post),
         )
 
     if post.status == "PUBLISHED":

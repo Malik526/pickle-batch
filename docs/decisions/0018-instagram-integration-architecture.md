@@ -282,3 +282,53 @@ tester access). The decisions above stand; implementation resolved these details
   `oauth_states.return_target`.
 
 Evidence: `docs/evaluations/productization/milestone-4.1-instagram-oauth.md`.
+
+## Addendum — 2026-10-10 (Milestone 4.2 implementation: Reels publishing)
+
+Implemented through the existing machinery, as Decision 5 planned. The changes from that plan,
+and what was settled during implementation:
+
+- **IDs.** `platform_posts.platform_post_id` holds the container id for the whole life of the row
+  (status checks and recovery use it; never overwritten). New nullable
+  `platform_posts.platform_media_id` (Postgres migration `0012`, SQLite column migration) holds
+  the Reel's media id from `media_publish`. It stays NULL when publication was confirmed only from
+  the container's status.
+- **Publisher contract.** Rather than a media-source object, a pull-URL publisher receives
+  `media_url=` in `publish()`, issued by the caller right after the submission checkpoint and
+  immediately before container creation. TikTok's signature is untouched. `Publisher` gains
+  `requires_finalize` and an optional `finalize()`. `PublishStatusResult` gains
+  `STATUS_READY_TO_FINALIZE` and optional `failure_code` / `platform_media_id`.
+- **One finalize path.** `scheduling/finalization.finalize_ready_submission` is the only place
+  `media_publish` is called. It's used by the inline poll, reconciliation and crash recovery.
+- **No automatic re-publish of a container.** Meta doesn't document whether `media_publish` is
+  idempotent per container, so Decision 5's "safe to repeat" assumption is **not** relied on:
+  - a `PUBLISH_REQUESTED` checkpoint is written, compare-and-swap, before the call;
+  - an ambiguous outcome (timeout, network, 5xx) keeps the checkpoint, and the container's status
+    decides;
+  - a still-unpublished container after `PLATFORM_POST_STALE_MINUTES` is parked UNKNOWN
+    (`PUBLISH_OUTCOME_UNKNOWN`);
+  - retrying that requires the user to confirm it wasn't posted, and then re-checks the **same**
+    container;
+  - an HTTP 4xx answer clears the checkpoint, since Meta rejected the request and nothing was
+    posted.
+- **Container ERROR/EXPIRED → FAILED, retried deliberately.** A manual retry creates a new
+  container. Automatic replacement of failed containers is not implemented; a few retryable Meta
+  errors (not-ready, transient, media fetch, rate limit) use the normal retry budget before any
+  container exists.
+- **Assignment.** Queue assign endpoints accept an optional `platforms` list (validated
+  publishable and connected before anything changes). Omitted keeps the configured default.
+  This is the minimal 4.2 path; the multi-platform distribution model is 4.3.
+- **Validation before submission.** `publishing/instagram/media_requirements.py` covers
+  container, codecs, 3 s–15 min, 23–60 fps, ≤300 MB, ≤1920 px wide, and caption limits. No
+  transcoding, so the existing 4K iPhone uploads (3840 px) are rejected with an actionable reason.
+- **Worker dispatch** is by platform (`hosted_worker.default_publisher_factories`), with errors
+  isolated per user and platform. The worker still needs no Instagram app secret.
+- **Status.** Publications carry `stage` (`PROCESSING` / `PUBLISHING`) while an Instagram post
+  is PUBLISHING; the Queue lists deliveries per platform.
+
+Deployment rule found during implementation: opening a `PostgresContentStore` applies pending
+migrations. Before 4.2, the deployed code built records from `SELECT *` rows, so a migration
+applied under older running code broke every read of that table. 4.2 makes reads ignore
+unknown columns, but the deployed code before 4.2 doesn't. Deploy the API and worker together,
+and never open a store against production from a working tree with unreleased migrations (see
+the 4.2 evaluation's incident record).

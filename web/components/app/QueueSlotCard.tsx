@@ -5,6 +5,7 @@ import { CaptionEditor } from "@/components/app/CaptionEditor";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import Link from "next/link";
+import { PlatformDeliveryList } from "@/components/app/PlatformDeliveryList";
 import { presentActionHint, presentQueueStatus } from "@/lib/status";
 import type { CaptionResponse, QueueSlotResponse, VideoResponse } from "@/lib/api/types";
 
@@ -58,6 +59,11 @@ function formatSlotDateTime(iso: string): string {
  *   onSaveCaption(videoId, text) / onGenerateCaption(videoId, overwrite) —
  *     Milestone 3.10: the assigned video's caption actions, rendered via
  *     CaptionEditor below the slot row.
+ *
+ * Milestone 4.2: when the slot's video goes to Instagram (or more than one
+ * platform), PlatformDeliveryList shows each platform's state on its own
+ * row in place of the single message; the badge stays the slot's overall
+ * (most urgent) status.
  */
 export function QueueSlotCard({
   slot,
@@ -82,6 +88,9 @@ export function QueueSlotCard({
   const [pendingVideoId, setPendingVideoId] = useState<string>("");
   const [confirmingRetry, setConfirmingRetry] = useState(false);
   const presentation = presentQueueStatus(slot.display_status);
+  // Milestone 4.2: list deliveries per platform once a slot goes anywhere
+  // besides TikTok alone; a TikTok-only slot reads exactly as before.
+  const showsDeliveries = slot.publications.some((publication) => publication.platform !== "tiktok") || slot.publications.length > 1;
   const hint = presentActionHint(slot.action_hint);
 
   return (
@@ -95,7 +104,13 @@ export function QueueSlotCard({
           {slot.published_at ? (
             <p className="mt-0.5 text-xs text-ink-muted">Published {formatPublishedAt(slot.published_at)}</p>
           ) : null}
-          {slot.message ? <p className="mt-1 text-xs text-ink">{slot.message}</p> : null}
+          {showsDeliveries ? (
+            <div className="mt-2">
+              <PlatformDeliveryList publications={slot.publications} />
+            </div>
+          ) : slot.message ? (
+            <p className="mt-1 text-xs text-ink">{slot.message}</p>
+          ) : null}
           {hint ? (
             hint.href ? (
               <Link href={hint.href} className="tap-target mt-0.5 inline-block text-xs font-medium text-accent hover:underline">

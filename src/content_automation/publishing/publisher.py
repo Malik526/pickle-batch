@@ -60,15 +60,40 @@ class PublishResult:
     raw_response: dict | None = None
 
 
+# Milestone 4.2: the shared status vocabulary publish_tiktok._resolve_poll_outcome
+# understands. TikTokPublisher already reports PUBLISH_COMPLETE / FAILED
+# natively; a platform with its own vocabulary (Instagram) normalizes to
+# these. Anything else means "still processing".
+STATUS_PUBLISH_COMPLETE = "PUBLISH_COMPLETE"
+STATUS_FAILED = "FAILED"
+# Processing finished but nothing is posted until the client takes the
+# platform's second step (Publisher.finalize — Instagram's media_publish).
+STATUS_READY_TO_FINALIZE = "READY_TO_FINALIZE"
+
+
 @dataclass
 class PublishStatusResult:
     """Returned by Publisher.get_status(). `status` is the platform's own
     vocabulary (not normalized to this project's platform_posts.status
     values) — callers map it to PENDING/PUBLISHING/PUBLISHED/FAILED
-    themselves, since that mapping is platform-specific."""
+    themselves, since that mapping is platform-specific.
+
+    Milestone 4.2 (optional, default None, so TikTok is unchanged):
+    failure_code is a machine label for a platform-reported failure when it
+    differs from failure_reason; platform_media_id is the published post's
+    id when the status check itself reveals it."""
     status: str
     failure_reason: str | None = None
     raw_response: dict | None = None
+    failure_code: str | None = None
+    platform_media_id: str | None = None
+
+
+@dataclass
+class FinalizeResult:
+    """Returned by Publisher.finalize(): the published post's platform id
+    (Instagram: the media id from media_publish)."""
+    platform_media_id: str
 
 
 class Publisher(ABC):
@@ -99,11 +124,35 @@ class Publisher(ABC):
         content_store.get_platform_post(). on_platform_post_id: see
         reports_platform_post_id_before_media_transfer above."""
 
+    # Milestone 4.2: a publisher that sets this True publishes in two
+    # client-driven steps. publish() only creates a submission (Instagram:
+    # a media container, which never posts by itself); get_status() reports
+    # STATUS_READY_TO_FINALIZE once the platform has processed it; and
+    # finalize() is the step that creates the post. The caller persists a
+    # PUBLISH_REQUESTED checkpoint before finalize() — see
+    # scheduling/finalization.py.
+    requires_finalize: bool = False
+
+    # Milestone 4.2: a pull-URL publisher (publishing/platforms.py
+    # media_delivery == "pull_url") receives `media_url=` in publish(): a
+    # short-lived signed URL the platform fetches the video from, issued by
+    # the caller immediately before the call. video_path is then unused. A
+    # publisher must never log, store or return that URL.
+
     @abstractmethod
     def get_status(self, platform_post_id: str) -> PublishStatusResult:
         """Check a previously submitted post's current status. Raises
         PublishError on a malformed response or platform-reported error —
         never returns a fabricated status just to avoid raising."""
+
+
+    def finalize(self, platform_post_id: str) -> FinalizeResult:
+        """Take the step that creates the post for a submission that
+        get_status() reported STATUS_READY_TO_FINALIZE. Only called when
+        requires_finalize is True. Raises PublishError; an error carrying
+        an HTTP 4xx status means the platform answered and rejected the
+        request (nothing was posted), anything else is ambiguous."""
+        raise NotImplementedError(f"{type(self).__name__} has no finalize step")
 
 
 class UnsupportedPlatformError(Exception):

@@ -36,7 +36,8 @@ starts `autobuild run`.
 | Order | ID | Title | Autonomy | Status | Brief |
 | --- | --- | --- | --- | --- | --- |
 | 1 | M4.1A | Build Instagram OAuth integration | GREEN | Implemented; pending review | [Brief](milestone-4.1/M4.1A-instagram-oauth-integration.md) |
-| 2 | M4.1B | Validate Instagram OAuth against Meta | YELLOW | Ready; blocked on Meta access | [Brief](milestone-4.1/M4.1B-live-meta-oauth-validation.md) |
+| 2 | M4.1B | Validate Instagram OAuth against Meta | YELLOW | Live connection proven (@picklebatchapp); token-refresh observation pending | [Brief](milestone-4.1/M4.1B-live-meta-oauth-validation.md) |
+| 3 | M4.2 | Instagram Reels publishing | YELLOW (live publishing) | Implemented, mocked-Meta tests pass; live Reel test pending deploy | Manual brief (no Autobuild brief); see [evaluation](../evaluations/productization/milestone-4.2-instagram-reels-publishing.md) |
 
 ## Handoff
 

@@ -48,6 +48,8 @@ from content_automation.persistence.content_store import ContentStore, PlatformP
 from content_automation.publishing.publisher import Publisher
 from content_automation.scheduling import due_post_selector
 from content_automation.scheduling.publish_tiktok import PublishTikTokError, execute_claimed_platform_post
+# Re-exported: log_event lives in scheduling/telemetry.py since Milestone 4.2.
+from content_automation.scheduling.telemetry import log_event  # noqa: F401
 from content_automation.storage.protocol import StorageProtocol
 
 
@@ -58,11 +60,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def log_event(event: str, **fields) -> None:
-    """One structured key=value line (Milestone 3.12). Callers pass ids,
-    statuses and codes only — never tokens, credentials or raw exception
-    text (which can embed platform response bodies)."""
-    logger.info(" ".join([f"event={event}", *(f"{key}={value}" for key, value in fields.items())]))
 
 
 @dataclass

@@ -48,7 +48,8 @@ from content_automation.publishing.platforms import publishable
 
 
 def materialize_platform_posts_for_assignment(
-    store: ContentStore, video_id: int, slot_id: int, created_at: str, user_id: int | None = None
+    store: ContentStore, video_id: int, slot_id: int, created_at: str, user_id: int | None = None,
+    platforms: list[str] | None = None,
 ) -> None:
     """Create a PENDING platform_posts row (scheduled_at = the assigned
     slot's scheduled_at) for every platform in
@@ -71,7 +72,11 @@ def materialize_platform_posts_for_assignment(
     # Milestone 4.0: only platforms with a hosted publisher get a row —
     # listing "instagram" before Milestone 4.2 must not create posts that
     # nothing will ever publish (they'd surface as SCHEDULE_MISSED).
-    for platform in publishable(TARGET_PUBLISHING_PLATFORMS):
+    # Milestone 4.2: `platforms` is an explicit, already-validated choice
+    # (scheduling/queue_assignment.resolve_target_platforms); None keeps the
+    # configured default.
+    targets = publishable(platforms if platforms is not None else TARGET_PUBLISHING_PLATFORMS)
+    for platform in targets:
         store.insert_platform_post_if_missing(
             video_id, platform, scheduled_at=slot.scheduled_at, created_at=created_at, user_id=user_id
         )

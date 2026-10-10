@@ -2,6 +2,79 @@
 
 ## 2026-10-10
 
+### Milestone 4.2 — Instagram Reels Publishing
+
+Implemented and tested with mocked Meta on SQLite and Postgres. Live Reel publication is not
+verified yet: it needs this code deployed to both Railway services. Not deployed; migration `0012`
+not applied to production.
+
+- Instagram publisher (`publishing/instagram/content_publishing.py`, `publisher.py`):
+  - Reels container from a short-lived signed URL, container status, `media_publish`;
+  - Meta errors mapped to classified reason codes with no token, URL or body in messages;
+  - hosted per-user credentials through the 4.1 credential store (the worker needs no Instagram
+    secret).
+- `media_requirements.py`: Reels limits (MOV/MP4, H.264/HEVC, AAC, 3 s–15 min, 23–60 fps,
+  ≤300 MB, ≤1920 px wide) and caption limits (2,200 chars, 30 hashtags, 20 mentions), checked
+  before any Meta call. No transcoding, so current 4K uploads are rejected with an actionable
+  reason.
+- Shared machinery:
+  - `Publisher.requires_finalize` / `finalize()` and `STATUS_READY_TO_FINALIZE`;
+  - `scheduling/finalization.py` as the only `media_publish` caller, behind a
+    compare-and-swap `PUBLISH_REQUESTED` checkpoint: ambiguous outcomes resolve from container
+    status, a container is never re-published automatically, and unconfirmed publishes are parked
+    UNKNOWN;
+  - READY handling in the inline poll, reconciliation and crash recovery;
+  - pull-URL execution path (signed URL issued after the checkpoint, never stored or logged);
+  - manual retry re-checks the same container, with confirmation when a publish may have
+    happened.
+- Persistence: `platform_posts.platform_media_id` (Postgres `0012`, SQLite column migration).
+  The container id stays in `platform_post_id`. Postgres reads ignore unknown columns.
+- Worker dispatches by platform with errors isolated per user and platform. `log_event` moved to
+  `scheduling/telemetry.py` (re-exported from `worker`).
+- API: optional `platforms` on the assign endpoints (validated publishable and connected; omitted
+  keeps the default). Publications carry `stage` (PROCESSING/PUBLISHING).
+- Retry classification and failure-taxonomy entries for the new Instagram codes. Instagram is
+  `publishing_available=True`.
+- Web: Queue "Publish to" picker (only when Instagram is connected) and per-platform delivery
+  rows (Scheduled / Processing / Publishing / Published / Failed / Unknown).
+- Tests:
+  - new `test_instagram_content_publishing.py` (37), `test_instagram_publishing_flow.py`
+    (20 × SQLite/Postgres), `test_postgres_forward_compat.py`,
+    `test_sqlite_platform_media_id.py`; `test_api_queue.py` +4;
+    `web/tests/routes/queue-instagram.test.tsx` (6);
+  - updated: the 4.0 registry tests (they encoded "not publishable until 4.2"; the guard is now
+    tested with a synthetic platform), the exact-shape publication test (+`stage`), and
+    `test_api_platforms_instagram.py` (no longer depends on the developer's `.env`).
+  - Backend 1488 passed, 1 failed: `test_media_storage_postgres`, which also fails on the
+    committed code (stale object at a shared key in the test bucket).
+  - Frontend 214/214; eslint, `tsc --noEmit`, `next build`, `git diff --check` clean.
+- Live verification: a signed Supabase URL serves the private object without auth (206/200,
+  `video/quicktime`); the tokenless and public paths are refused; it expires on time. The
+  production Instagram credential decrypts and belongs to @picklebatchapp, with both scopes.
+
+### Operations — Accidental Production Migration 0012 Rolled Back
+
+- 19:11 UTC: a read-only investigation query run from the 4.2 working tree opened a production
+  `PostgresContentStore`, which applies pending migrations, and added
+  `platform_posts.platform_media_id`. Pre-4.2 deployed code can't read rows with unknown columns,
+  so Queue, Library and worker reads of `platform_posts` failed until rollback; `/api/health`
+  stayed 200.
+- Rolled back with the user's approval in one guarded transaction: the column was empty; it was
+  dropped and its `schema_migrations` row deleted. Verified the deployed code then read
+  production without error, with no pending migrations. No posts were affected.
+- Prevention: Postgres reads ignore unknown columns from 4.2 on. AGENTS.md now forbids opening
+  stores against production from a working tree with unreleased migrations, and requires deploying
+  the API and worker together.
+
+### Milestone 4.2 — Docs
+
+- ADR-0018 2026-10-10 addendum: implementation decisions (ids, publisher contract, the no
+  automatic re-publish rule, assignment, validation, dispatch, `stage`) and the
+  migration-on-open deployment rule.
+- `docs/evaluations/productization/milestone-4.2-instagram-reels-publishing.md`: state-transition
+  table, automated and live evidence, incident record, live-test runbook, limitations.
+- `PROJECT_STATE.md`, `AGENTS.md` (durable rules), `README.md`, `.env.example`, roadmap index.
+
 ### Web — Public User Data Deletion Page and Real Contact Address
 
 - New public `/data-deletion` page (`web/app/(marketing)/data-deletion/page.tsx`): Meta's "Data

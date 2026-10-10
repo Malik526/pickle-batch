@@ -200,6 +200,10 @@ export interface PublicationStatus {
   reason_code: string | null;
   message: string | null;
   action_hint: string | null;
+  /** Milestone 4.2 — "PROCESSING" (the platform is processing the upload)
+   * or "PUBLISHING" (the post is being made) for Instagram while
+   * PUBLISHING; null/absent otherwise or from an older API. */
+  stage?: string | null;
 }
 
 export interface QueueSlotResponse {
