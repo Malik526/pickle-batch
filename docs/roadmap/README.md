@@ -37,7 +37,9 @@ starts `autobuild run`.
 | --- | --- | --- | --- | --- | --- |
 | 1 | M4.1A | Build Instagram OAuth integration | GREEN | Implemented; pending review | [Brief](milestone-4.1/M4.1A-instagram-oauth-integration.md) |
 | 2 | M4.1B | Validate Instagram OAuth against Meta | YELLOW | Live connection proven (@picklebatchapp); token-refresh observation pending | [Brief](milestone-4.1/M4.1B-live-meta-oauth-validation.md) |
-| 3 | M4.2 | Instagram Reels publishing | YELLOW (live publishing) | Implemented, mocked-Meta tests pass; live Reel test pending deploy | Manual brief (no Autobuild brief); see [evaluation](../evaluations/productization/milestone-4.2-instagram-reels-publishing.md) |
+| 3 | M4.2 | Instagram Reels publishing | YELLOW (live publishing) | Live Reel published 2026-10-10; restart test pending | Manual brief; see [evaluation](../evaluations/productization/milestone-4.2-instagram-reels-publishing.md) |
+| 4 | M4.2.1 | Instagram media normalization | YELLOW (live publishing) | Committed; Supabase-path test, delete cleanup and live 4K pending | [Handover](milestone-4.2.1/M4.2.1-handover.md); see [evaluation](../evaluations/productization/milestone-4.2.1-instagram-media-normalization.md) |
+| 5 | M4.2.2 | Retry legacy Instagram media failures | YELLOW (live publishing) | Implemented and tested; live retry of video 18 pending deploy | Manual brief; see [evaluation](../evaluations/productization/milestone-4.2.1-instagram-media-normalization.md) |
 
 ## Handoff
 

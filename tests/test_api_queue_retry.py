@@ -156,3 +156,55 @@ def test_retry_requires_authentication(client, users, db_path):
     app_module.app.dependency_overrides.pop(auth_deps.get_current_user)
 
     assert client.post(f"/api/queue/slots/{slot_id}/retry").status_code == 401
+
+
+# --- Milestone 4.2.2: Retry for Instagram slots ------------------------------------------
+
+def _instagram_slot(client, db_path, user, **post_fields):
+    """An Instagram-only slot (the Queue's "Publish to → Instagram" choice)."""
+    with ContentStore(db_path=db_path) as store:
+        store.get_or_create_platform_connection(user.id, "instagram", external_account_id=f"ig-{user.id}")
+        store.insert_slot_if_missing(FUTURE, None, None, NOW.isoformat(), user_id=user.id)
+        slot_id = store._conn.execute(
+            "SELECT id FROM content_slots WHERE user_id = ? AND scheduled_at = ?", (user.id, FUTURE)
+        ).fetchone()["id"]
+        video_id = store.insert_video("hash-ig", "reel.mov", "/in/reel.mov", NOW.isoformat(), user_id=user.id).id
+    _act_as(user)
+    response = client.post(f"/api/queue/slots/{slot_id}/assign", json={"video_id": video_id, "platforms": ["instagram"]})
+    assert response.status_code == 200
+    with ContentStore(db_path=db_path) as store:
+        post = store.get_platform_post(video_id, "instagram")
+        store.update_platform_post(post.id, updated_at=NOW.isoformat(), **post_fields)
+    return slot_id, video_id
+
+
+def test_retry_with_no_platform_requeues_an_instagram_only_slot(client, users, db_path):
+    # The production bug: the body names no platform (as the Queue UI sends it), and the
+    # endpoint used to look for a TikTok post → 404, leaving the Instagram row FAILED.
+    slot_id, video_id = _instagram_slot(client, db_path, users[0], status="FAILED", failure_code="INSTAGRAM_MEDIA_RESOLUTION")
+
+    response = client.post(f"/api/queue/slots/{slot_id}/retry", json={"confirm_not_published": False})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["display_status"] == "SCHEDULED" and body["message"] is None  # old failure no longer shown
+    with ContentStore(db_path=db_path) as store:
+        assert store.get_platform_post(video_id, "instagram").status == "PENDING"
+
+
+def test_retry_of_an_instagram_duration_failure_is_refused_with_a_clear_reason(client, users, db_path):
+    slot_id, video_id = _instagram_slot(client, db_path, users[0], status="FAILED", failure_code="INSTAGRAM_MEDIA_DURATION")
+    listed = client.get("/api/queue/slots", params=WINDOW).json()["slots"][0]
+    assert listed["can_retry"] is False
+
+    response = client.post(f"/api/queue/slots/{slot_id}/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "NOT_RETRYABLE"
+    with ContentStore(db_path=db_path) as store:
+        assert store.get_platform_post(video_id, "instagram").status == "FAILED"
+
+
+def test_naming_a_platform_with_no_post_is_still_404(client, users, db_path):
+    slot_id, _ = _instagram_slot(client, db_path, users[0], status="FAILED", failure_code="NETWORK_ERROR")
+    assert client.post(f"/api/queue/slots/{slot_id}/retry", json={"platform": "tiktok"}).status_code == 404

@@ -88,5 +88,8 @@ class RetryPublishRequest(BaseModel):
     and the post isn't there — required to resubmit a post whose outcome is
     UNKNOWN with no platform id (see scheduling.manual_recovery)."""
 
-    platform: str = "tiktok"
+    # Milestone 4.2.2: omitted → every retryable post of the slot (the Queue's
+    # Retry button). Before, it defaulted to "tiktok", so an Instagram-only
+    # slot's Retry was a 404.
+    platform: str | None = None
     confirm_not_published: bool = False

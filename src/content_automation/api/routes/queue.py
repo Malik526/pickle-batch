@@ -87,7 +87,7 @@ from content_automation.persistence.content_store import (
 )
 from content_automation.persistence.protocol import ContentStoreProtocol
 from content_automation.publishing.publish_status import resolve_slot_publish_status
-from content_automation.scheduling.manual_recovery import RetryRejectedError, retry_platform_post
+from content_automation.scheduling.manual_recovery import RetryRejectedError, retry_platform_post, retry_slot_posts
 from content_automation.scheduling.queue_assignment import (
     InvalidPlatformSelectionError,
     NoOpenSlotAvailableError,
@@ -223,11 +223,18 @@ def retry_slot_publication(
 ) -> QueueSlotResponse:
     body = body or RetryPublishRequest()
     slot = _get_owned_slot(store, slot_id, user.id)
-    post = store.get_platform_post(slot.assigned_video_id, body.platform) if slot.assigned_video_id else None
-    if post is None or post.user_id != user.id:
+    if body.platform is not None:
+        post = store.get_platform_post(slot.assigned_video_id, body.platform) if slot.assigned_video_id else None
+        posts = [post] if post is not None and post.user_id == user.id else []
+    else:
+        posts = [p for p in store.list_platform_posts_for_video(slot.assigned_video_id) if p.user_id == user.id] if slot.assigned_video_id else []
+    if not posts:
         raise HTTPException(status_code=404, detail="No platform post to retry for this slot.")
     try:
-        retry_platform_post(store, post, user_id=user.id, confirm_not_published=body.confirm_not_published)
+        if body.platform is not None:
+            retry_platform_post(store, posts[0], user_id=user.id, confirm_not_published=body.confirm_not_published)
+        else:
+            retry_slot_posts(store, posts, user_id=user.id, confirm_not_published=body.confirm_not_published)
     except RetryRejectedError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)})
     return _to_queue_slot_response(store, store.get_slot(slot_id))

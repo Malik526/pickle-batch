@@ -55,6 +55,7 @@ from content_automation.persistence.content_store import PlatformPostRecord
 from content_automation.persistence.protocol import ContentStoreProtocol
 from content_automation.publishing.publish_status import (
     PUBLISH_REQUESTED,
+    RETRYABLE_POST_STATUSES,
     post_can_retry,
     post_retry_requires_confirmation,
 )
@@ -77,6 +78,10 @@ def retry_platform_post(
     """Move `post` (owned by user_id — the caller has already checked) back
     into the automatic pipeline. See module docstring for the rules."""
     if not post_can_retry(post):
+        if post.status in RETRYABLE_POST_STATUSES:  # a permanent media failure (Milestone 4.2.2)
+            raise RetryRejectedError(
+                "NOT_RETRYABLE", "This video can't be published there as it is: retrying won't change that.",
+            )
         raise RetryRejectedError(
             "NOT_RETRYABLE", f"A {post.status} post can't be retried — only FAILED or UNKNOWN posts can.",
         )
@@ -117,3 +122,39 @@ def retry_platform_post(
         previous_platform_post_id=post.platform_post_id if decision == "RESUBMIT" else None,
     )
     return store.get_platform_post(post.video_id, post.platform)
+
+
+def retry_slot_posts(
+    store: ContentStoreProtocol, posts: list[PlatformPostRecord], *, user_id: int, confirm_not_published: bool = False,
+) -> list[PlatformPostRecord]:
+    """Milestone 4.2.2: Retry for a whole slot when the caller names no
+    platform — every retryable post of the slot's video (TikTok, Instagram,
+    or both), each through retry_platform_post's own rules, so container
+    safety is unchanged: a post with a container id is re-checked (or, for a
+    FAILED ERROR/EXPIRED container, deliberately replaced) exactly as a
+    single-platform retry would.
+
+    Before 4.2.2 the endpoint retried only the TikTok post, so an
+    Instagram-only slot's Retry returned 404 and the failed row never moved.
+
+    All checks run before anything is changed: if any retryable post needs
+    the user's confirmation and it wasn't given, nothing is retried.
+    confirm_not_published is passed only to posts that need it (for others
+    it would turn a safe re-check into a resubmission). If no post is
+    retryable, the first post's rejection is raised."""
+    owned = [post for post in posts if post.user_id == user_id]
+    retryable = [post for post in owned if post_can_retry(post)]
+    if not retryable:
+        if not owned:
+            raise RetryRejectedError("NOT_RETRYABLE", "There's nothing to retry for this slot.")
+        retry_platform_post(store, owned[0], user_id=user_id)  # raises the specific rejection
+    if not confirm_not_published and any(post_retry_requires_confirmation(post) for post in retryable):
+        raise RetryRejectedError(
+            "CONFIRMATION_REQUIRED",
+            "It's unknown whether this was published. Check the platform, then confirm it wasn't posted to retry.",
+        )
+    return [
+        retry_platform_post(store, post, user_id=user_id,
+                            confirm_not_published=confirm_not_published and post_retry_requires_confirmation(post))
+        for post in retryable
+    ]

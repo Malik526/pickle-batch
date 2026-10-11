@@ -126,8 +126,18 @@ def _publishing_message(post: PlatformPostRecord) -> str:
 RETRYABLE_POST_STATUSES = ("FAILED", "UNKNOWN")
 
 
+# Milestone 4.2.2: failures a retry can never fix because the video file
+# itself is immutable. Instagram's 3 s–15 min limit is applied to the source
+# and never "fixed" by trimming or padding (M4.2.1). Caption failures stay
+# retryable (the caption can be edited first), and so does
+# INSTAGRAM_MEDIA_RESOLUTION from before 4.2.1, which normalization now handles.
+_PERMANENT_FAILURES = {"instagram": frozenset({"INSTAGRAM_MEDIA_DURATION"})}
+
+
 def post_can_retry(post: PlatformPostRecord) -> bool:
-    return post.status in RETRYABLE_POST_STATUSES
+    if post.status not in RETRYABLE_POST_STATUSES:
+        return False
+    return post.failure_code not in _PERMANENT_FAILURES.get(post.platform, frozenset())
 
 
 def post_retry_requires_confirmation(post: PlatformPostRecord) -> bool:

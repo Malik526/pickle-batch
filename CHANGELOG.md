@@ -1,5 +1,34 @@
 # Content Automation — Changelog
 
+## 2026-10-11
+
+### Milestone 4.2.2 — Retry for Instagram Slots Reaches the Post
+
+- Root cause: the Queue's Retry sends no platform and `RetryPublishRequest.platform` defaulted
+  to `"tiktok"`, so an Instagram-only slot's Retry returned 404 and the failed row never moved.
+  Production's 4K post 33 was untouched since 2026-10-10.
+- With no platform named, Retry now retries every retryable post of the slot
+  (`manual_recovery.retry_slot_posts`), each through the existing per-post rules: no new
+  container while one may exist, confirmation before anything changes, and the confirmation flag
+  passed only where needed. A named platform behaves as before.
+- Legacy `INSTAGRAM_MEDIA_RESOLUTION` failures now retry into 4.2.1 media preparation from the
+  stored source (no re-upload). `INSTAGRAM_MEDIA_DURATION` is not retryable: Retry is hidden and
+  the API answers 409 `NOT_RETRYABLE`.
+- Tests: 6 flow scenarios × SQLite/Postgres in `test_instagram_publishing_flow.py` (real
+  normalization of a rotated 4K fixture on retry, derivative reuse, duration refusal, container
+  re-check, both-platform retry with confirmation, owner isolation) and 3 API tests (the 404
+  reproduced on committed code). TikTok retry tests are unchanged. Full results are in the 4.2.1
+  evaluation.
+
+### Docs — 4.2 Live Result, 4.2.1 Evaluation
+
+- `milestone-4.2-instagram-reels-publishing.md` addendum: the live Reel published (post 34,
+  verified read-only); this supersedes "not run".
+- New `milestone-4.2.1-instagram-media-normalization.md`: what 4.2.1 (`10a717e`, committed
+  mid-implementation, no changelog entry at the time) does and verifies, what's still outstanding
+  from its handover, and 4.2.2.
+- `PROJECT_STATE.md` and the roadmap index updated.
+
 ## 2026-10-10
 
 ### Milestone 4.2 — Instagram Reels Publishing

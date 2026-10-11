@@ -39,7 +39,7 @@ from content_automation.publishing.publisher import (
 )
 from content_automation.scheduling.finalization import finalize_ready_submission
 from content_automation.scheduling.hosted_worker import run_hosted_cycle
-from content_automation.scheduling.manual_recovery import RetryRejectedError, retry_platform_post
+from content_automation.scheduling.manual_recovery import RetryRejectedError, retry_platform_post, retry_slot_posts
 from content_automation.scheduling.queue_assignment import (
     InvalidPlatformSelectionError,
     PlatformNotConnectedError,
@@ -565,3 +565,126 @@ def test_each_user_publishes_only_with_their_own_publisher(store, storage, reel_
     assert _row(store, a_post).platform_media_id == "media-a"
     assert _row(store, b_post).platform_media_id == "media-b"
     assert len(fakes[alice.id].creates) == 1 and len(fakes[bob.id].creates) == 1
+
+
+# --- Milestone 4.2.2: retrying failures from before normalization existed -------------------
+
+@pytest.fixture(scope="module")
+def iphone_4k_file(tmp_path_factory):
+    """An iPhone-style portrait 4K clip: coded 3840x2160 plus a rotation flag."""
+    root = tmp_path_factory.mktemp("media4k")
+    raw = root / "raw.mov"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=3840x2160:rate=30",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:v", "libx264", "-preset", "ultrafast",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(raw)],
+        check=True,
+    )
+    clip = root / "iphone-portrait-4k.mov"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-c", "copy", "-metadata:s:v:0", "rotate=90", str(clip)],
+                   check=True)
+    return clip
+
+
+def _legacy_failed_post(store, storage, user, clip, tmp_path, *, failure_code, name="legacy", width=3840, height=2160,
+                        duration=4.0, platform_post_id=None, status="FAILED"):
+    """A post exactly as M4.2 left it: never submitted, FAILED with a
+    pre-normalization media code, the source's probe stored in its row."""
+    post = _instagram_post(store, storage, user, clip, tmp_path, name=name)
+    store.update_video(post.video_id, container="mov", video_codec="h264", audio_codec="aac", width=width, height=height,
+                       fps=30.0, duration_seconds=duration)
+    store.update_platform_post(post.id, updated_at=_iso_now(), status=status, platform_post_id=platform_post_id,
+                               failure_code=failure_code, failure_reason=f"Video {post.video_id}: legacy {failure_code}")
+    return _row(store, post)
+
+
+def _slot_status(store, post):
+    slot = store.get_slot(store.get_video(post.video_id).assigned_slot_id)
+    return resolve_slot_publish_status(slot, store.list_platform_posts_for_video(post.video_id))
+
+
+def test_legacy_too_wide_failure_retries_through_normalization_and_publishes(store, storage, iphone_4k_file, tmp_path):
+    user = _user(store)
+    post = _legacy_failed_post(store, storage, user, iphone_4k_file, tmp_path, failure_code="INSTAGRAM_MEDIA_RESOLUTION")
+    assert _slot_status(store, post).can_retry
+
+    [retried] = retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=user.id)
+    assert (retried.status, retried.platform_post_id) == ("PENDING", None)
+    status = _slot_status(store, post)
+    assert status.display_status == "SCHEDULED" and status.message is None  # the old failure isn't the active state
+
+    fake = FakeInstagram()
+    _cycle(store, storage, {user.id: fake}, minutes_later=3)  # retry backoff elapsed → claimed, normalized, submitted
+    _cycle(store, storage, {user.id: fake}, minutes_later=5)
+    row = _row(store, post)
+    assert (row.status, row.platform_media_id) == ("PUBLISHED", "media-1")
+    [(signed_key, _ttl)] = storage.signed
+    assert "/derived/instagram/reel-" in signed_key and SIGNED_TOKEN in fake.urls[0]  # Instagram got the derivative
+    assert storage.exists(store.get_video(post.video_id).storage_key)  # source untouched, no re-upload
+    assert fake.creates == ["container-1"]
+
+
+def test_legacy_retry_reuses_an_existing_derivative(store, storage, iphone_4k_file, tmp_path, monkeypatch):
+    from content_automation.publishing.instagram import normalization
+    from content_automation.publishing.instagram.media_preparation import prepare_publishable_media
+
+    user = _user(store)
+    post = _legacy_failed_post(store, storage, user, iphone_4k_file, tmp_path, failure_code="INSTAGRAM_MEDIA_RESOLUTION")
+    existing = prepare_publishable_media(store, storage, store.get_video(post.video_id))  # made by an earlier attempt
+    monkeypatch.setattr(normalization, "normalize", lambda *a, **k: pytest.fail("must reuse the derivative"))
+
+    retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=user.id)
+    _cycle(store, storage, {user.id: FakeInstagram(statuses=[STATUS_READY_TO_FINALIZE])}, minutes_later=3)
+
+    assert _row(store, post).status == "PUBLISHED"
+    assert storage.signed[0][0] == existing.storage_key
+
+
+def test_hard_duration_failure_is_still_not_retryable(store, storage, reel_file, tmp_path):
+    user = _user(store)
+    post = _legacy_failed_post(store, storage, user, reel_file, tmp_path, failure_code="INSTAGRAM_MEDIA_DURATION",
+                               width=720, height=1280, duration=1.0)
+    assert not _slot_status(store, post).can_retry
+    with pytest.raises(RetryRejectedError) as rejected:
+        retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=user.id)
+    assert rejected.value.code == "NOT_RETRYABLE" and "retrying won't change that" in str(rejected.value)
+    assert _row(store, post).status == "FAILED"  # nothing changed
+
+
+def test_legacy_retry_with_an_existing_container_follows_container_recovery(store, storage, reel_file, tmp_path):
+    user = _user(store)
+    post = _legacy_failed_post(store, storage, user, reel_file, tmp_path, failure_code="REAUTHORIZATION_REQUIRED",
+                               width=720, height=1280, platform_post_id="container-7", status="UNKNOWN")
+    [retried] = retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=user.id)
+    assert (retried.status, retried.platform_post_id) == ("PUBLISHING", "container-7")  # re-check, no new container
+
+    fake = FakeInstagram(statuses=[STATUS_READY_TO_FINALIZE])
+    _cycle(store, storage, {user.id: fake}, minutes_later=2)
+    assert _row(store, post).status == "PUBLISHED"
+    assert fake.creates == [] and fake.finalize_calls == ["container-7"] and storage.signed == []
+
+
+def test_slot_retry_retries_every_failed_platform_and_respects_confirmation(store, storage, reel_file, tmp_path):
+    user = _user(store, tiktok=True)
+    video = _video(store, storage, user, reel_file, tmp_path, name="both")
+    assign_video_to_slot(store, video.id, _slot(store, user, -6).id, _iso_now(), user_id=user.id, platforms=["tiktok", "instagram"])
+    tiktok, instagram = store.get_platform_post(video.id, "tiktok"), store.get_platform_post(video.id, "instagram")
+    store.update_platform_post(tiktok.id, updated_at=_iso_now(), status="FAILED", failure_code="NETWORK_ERROR")
+    store.update_platform_post(instagram.id, updated_at=_iso_now(), status="UNKNOWN", failure_code="SUBMISSION_OUTCOME_UNKNOWN")
+
+    with pytest.raises(RetryRejectedError) as rejected:  # Instagram's outcome is unknown with no id
+        retry_slot_posts(store, store.list_platform_posts_for_video(video.id), user_id=user.id)
+    assert rejected.value.code == "CONFIRMATION_REQUIRED"
+    assert store.get_platform_post(video.id, "tiktok").status == "FAILED"  # nothing moved
+
+    retried = retry_slot_posts(store, store.list_platform_posts_for_video(video.id), user_id=user.id, confirm_not_published=True)
+    assert sorted(post.platform for post in retried) == ["instagram", "tiktok"]
+    assert all(post.status == "PENDING" for post in retried)
+
+
+def test_slot_retry_never_touches_another_users_post(store, storage, iphone_4k_file, tmp_path):
+    alice, bob = _user(store, "a@example.com"), _user(store, "b@example.com")
+    post = _legacy_failed_post(store, storage, alice, iphone_4k_file, tmp_path, failure_code="INSTAGRAM_MEDIA_RESOLUTION")
+    with pytest.raises(RetryRejectedError):
+        retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=bob.id)
+    assert _row(store, post).status == "FAILED"

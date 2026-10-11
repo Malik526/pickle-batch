@@ -163,3 +163,14 @@ doesn't read that table.
 - `tests/test_media_storage_postgres.py::test_upload_to_published_…` fails in this environment on
   the committed code too (a stale object at a shared key in the Supabase test bucket). Pre-existing
   and unrelated to 4.2.
+
+## Addendum — 2026-10-11: live Reel published
+
+Supersedes "Live Reel publication … not run" above. After the user deployed 4.2, a real
+iPhone 1080p clip (video 19, coded 1920×1080 with a rotation flag) published to @picklebatchapp.
+Production shows `platform_posts` 34 PUBLISHED at 2026-10-10 20:56:49 UTC, with both the container
+id and the Instagram media id stored (checked read-only). The same live session showed iPhone
+portrait 4K (video 18) rejected as `INSTAGRAM_MEDIA_RESOLUTION`. That was fixed by 4.2.1
+(normalization) and 4.2.2 (Retry for Instagram slots). See
+`milestone-4.2.1-instagram-media-normalization.md`. The live restart/recovery test is still not
+run.
