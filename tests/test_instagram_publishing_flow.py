@@ -688,3 +688,133 @@ def test_slot_retry_never_touches_another_users_post(store, storage, iphone_4k_f
     with pytest.raises(RetryRejectedError):
         retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=bob.id)
     assert _row(store, post).status == "FAILED"
+
+
+# --- Milestone 4.2.3: resource-safe normalization and no automatic re-encode loops --------------
+
+def _encode_calls(monkeypatch, command):
+    """Replace the ffmpeg command with `command` (a list or a function of the
+    destination path) and count how often an encode is started."""
+    from content_automation.publishing.instagram import normalization
+
+    calls = []
+
+    def build(src, dst, plan, **_):
+        calls.append(dst)
+        return command(dst) if callable(command) else command
+
+    monkeypatch.setattr(normalization, "build_ffmpeg_command", build)
+    return calls
+
+
+def test_due_4k_post_is_normalized_and_published_by_the_worker(store, storage, iphone_4k_file, tmp_path, caplog):
+    caplog.set_level("INFO")
+    user = _user(store)
+    post = _instagram_post(store, storage, user, iphone_4k_file, tmp_path, name="due4k")
+    fake = FakeInstagram(statuses=[STATUS_READY_TO_FINALIZE])
+
+    _cycle(store, storage, {user.id: fake})
+
+    row = _row(store, post)
+    assert (row.status, row.submission_state) == ("PUBLISHED", None)
+    assert "/derived/instagram/reel-" in storage.signed[0][0] and SIGNED_TOKEN in fake.urls[0]
+    assert "threads=2" in caplog.text and "peak_rss_mb=" in caplog.text and "output_resolution=1080x1920" in caplog.text
+
+
+def test_deterministic_preparation_failure_is_not_reclaimed_on_later_cycles(store, storage, iphone_4k_file, tmp_path, monkeypatch):
+    user = _user(store)
+    post = _instagram_post(store, storage, user, iphone_4k_file, tmp_path, name="broken")
+    calls = _encode_calls(monkeypatch, ["bash", "-c", "exit 1"])
+    fake = FakeInstagram()
+
+    _cycle(store, storage, {user.id: fake})
+    for minutes in (2, 30, 120):  # many later polls
+        _cycle(store, storage, {user.id: fake}, minutes_later=minutes)
+
+    row = _row(store, post)
+    assert (row.status, row.failure_code, row.submission_state) == ("FAILED", "INSTAGRAM_MEDIA_PREPARATION_FAILED", None)
+    assert len(calls) == 1 and fake.creates == []
+
+
+def test_oom_killed_encode_waits_for_an_explicit_retry_then_publishes(store, storage, iphone_4k_file, tmp_path, monkeypatch):
+    user = _user(store)
+    post = _instagram_post(store, storage, user, iphone_4k_file, tmp_path, name="oom")
+    calls = _encode_calls(monkeypatch, ["bash", "-c", "kill -9 $$"])
+    fake = FakeInstagram(statuses=[STATUS_READY_TO_FINALIZE])
+
+    _cycle(store, storage, {user.id: fake})
+    _cycle(store, storage, {user.id: fake}, minutes_later=60)
+    row = _row(store, post)
+    assert (row.status, row.failure_code) == ("FAILED", "INSTAGRAM_MEDIA_PREPARATION_KILLED")
+    assert len(calls) == 1 and _slot_status(store, post).can_retry
+
+    monkeypatch.undo()  # resources fixed: real encodes again
+    retry_slot_posts(store, store.list_platform_posts_for_video(post.video_id), user_id=user.id)
+    _cycle(store, storage, {user.id: fake}, minutes_later=63)
+    assert _row(store, post).status == "PUBLISHED"
+
+
+def test_interrupted_encode_backs_off_instead_of_hot_looping(store, storage, iphone_4k_file, tmp_path, monkeypatch):
+    user = _user(store)
+    post = _instagram_post(store, storage, user, iphone_4k_file, tmp_path, name="sigterm")
+    calls = _encode_calls(monkeypatch, ["bash", "-c", "kill -15 $$"])
+    fake = FakeInstagram()
+
+    _cycle(store, storage, {user.id: fake})
+    row = _row(store, post)
+    assert (row.status, row.failure_code, row.retry_count) == ("PENDING", "INSTAGRAM_MEDIA_PREPARATION_INTERRUPTED", 1)
+    assert row.next_retry_at is not None and row.submission_state is None
+
+    _cycle(store, storage, {user.id: fake})  # before the backoff elapses: not claimed again
+    assert len(calls) == 1
+
+
+def test_worker_death_while_preparing_is_retried_once_then_parked(store, storage, reel_file, tmp_path):
+    user = _user(store)
+    post = _instagram_post(store, storage, user, reel_file, tmp_path, name="died")
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=PLATFORM_POST_STALE_MINUTES + 5)).isoformat()
+    store.claim_platform_post(post.id, updated_at=stale, user_id=user.id)
+    store.update_platform_post(post.id, updated_at=stale, submission_state="PREPARING_MEDIA")
+
+    _cycle(store, storage, {user.id: FakeInstagram()})
+    row = _row(store, post)
+    assert (row.status, row.failure_code, row.retry_count, row.submission_state) == (
+        "PENDING", "INSTAGRAM_MEDIA_PREPARATION_INTERRUPTED", 1, None)
+
+    # It dies again on the retry: parked for an explicit Retry, not requeued forever.
+    store.claim_platform_post(post.id, updated_at=stale, user_id=user.id)
+    store.update_platform_post(post.id, updated_at=stale, submission_state="PREPARING_MEDIA")
+    _cycle(store, storage, {user.id: FakeInstagram()})
+    row = _row(store, post)
+    assert (row.status, row.failure_code) == ("FAILED", "INSTAGRAM_MEDIA_PREPARATION_INTERRUPTED")
+    assert _slot_status(store, post).can_retry
+
+
+def test_long_encode_keeps_its_claim_fresh_and_shows_processing(store, storage, iphone_4k_file, tmp_path, monkeypatch):
+    from content_automation.publishing.instagram import normalization
+
+    user = _user(store)
+    post = _instagram_post(store, storage, user, iphone_4k_file, tmp_path, name="slow")
+    monkeypatch.setattr(normalization, "HEARTBEAT_SECONDS", 0)
+    seen = []
+
+    def slow_encode(dst):
+        # While "encoding", record what the Queue and crash recovery would see.
+        row = _row(store, post)
+        seen.append((row.status, row.submission_state, _slot_status(store, post).publications[0].stage))
+        return ["bash", "-c", "sleep 3; exit 1"]
+
+    _encode_calls(monkeypatch, slow_encode)
+    beats = []
+    original = store.update_platform_post
+
+    def spy(post_id, updated_at, **fields):
+        if post_id == post.id and not fields:
+            beats.append(updated_at)
+        return original(post_id, updated_at, **fields)
+
+    monkeypatch.setattr(store, "update_platform_post", spy)
+    _cycle(store, storage, {user.id: FakeInstagram()})
+
+    assert seen == [("PUBLISHING", "PREPARING_MEDIA", "PROCESSING")]
+    assert beats  # heartbeat refreshed updated_at while ffmpeg ran

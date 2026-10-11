@@ -566,6 +566,13 @@ INSTAGRAM_MEDIA_URL_TTL_SECONDS = int(os.getenv("INSTAGRAM_MEDIA_URL_TTL_SECONDS
 # crash recovery never treats a long encode as a stalled claim.
 INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS = int(os.getenv("INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS") or "3600")
 
+# Milestone 4.2.3: ffmpeg decoder/encoder threads for that derivative. Bounded
+# because ffmpeg otherwise sizes its pools from the visible host cores and its
+# memory with them (an auto-threaded 4K encode peaked at ~1.2 GB and was
+# OOM-killed on the worker; 2 threads peaked at ~340 MB with no slowdown). See
+# publishing/instagram/normalization.py.
+INSTAGRAM_NORMALIZATION_THREADS = max(1, int(os.getenv("INSTAGRAM_NORMALIZATION_THREADS") or "2"))
+
 # Milestone 4.1: when a stored long-lived Instagram token (60 days) is
 # refreshed. Meta allows a refresh once the token is at least 24 hours old
 # and still valid; this refreshes on first use once fewer than this many

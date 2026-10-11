@@ -99,6 +99,7 @@ from pathlib import Path
 
 from content_automation.config import (
     INSTAGRAM_MEDIA_URL_TTL_SECONDS,
+    INSTAGRAM_NORMALIZATION_THREADS,
     INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS,
     MAX_RETRY_ATTEMPTS,
     RETRY_BACKOFF_MINUTES,
@@ -111,6 +112,7 @@ from content_automation.publishing.caption_resolution import resolve_publish_cap
 from content_automation.publishing.instagram import media_requirements as instagram_requirements
 from content_automation.publishing.instagram.media_preparation import PreparationError, prepare_publishable_media
 from content_automation.publishing.platforms import PLATFORMS, PULL_URL, TIKTOK
+from content_automation.publishing.publish_status import PREPARING_MEDIA
 from content_automation.publishing.publisher import STATUS_READY_TO_FINALIZE, PublishError, Publisher, PublishStatusResult
 from content_automation.scheduling.finalization import finalize_ready_submission
 from content_automation.storage.signed_urls import SignedUrlUnsupportedError
@@ -124,6 +126,9 @@ from content_automation.scheduling.slot_matcher import now_in_config_timezone
 # docstring's "Submission checkpoint".
 AWAITING_PLATFORM_ID = "AWAITING_PLATFORM_ID"
 SUBMITTING = "SUBMITTING"
+# Milestone 4.2.3: PREPARING_MEDIA (imported above from publish_status, where
+# the Queue reads it) marks a claim that is preparing media; nothing has been
+# sent to the platform. See scheduling/crash_recovery.py.
 
 # A video row's stable, file-level metadata (Milestone 3.13 — persisted
 # after the first successful publish-time inspection of a hosted upload).
@@ -397,6 +402,7 @@ def _validate_and_submit(
 def _mark_precondition_failed(store: ContentStore, record: PlatformPostRecord, exc: PublishTikTokError) -> None:
     store.update_platform_post(
         record.id, updated_at=_now_iso(), status="FAILED", failure_reason=str(exc), failure_code=exc.reason_code,
+        submission_state=None,  # Milestone 4.2.3: clears PREPARING_MEDIA
     )
 
 
@@ -583,14 +589,28 @@ def _execute_pull_url_post(
     # when it already meets the Reels spec, otherwise a normalized private
     # derivative (made once, then reused). The heartbeat keeps this claim
     # fresh during a long encode.
+    # Milestone 4.2.3: PREPARING_MEDIA marks the claim as "preparing media,
+    # nothing sent to the platform", so if the whole worker dies mid-encode
+    # (e.g. the container is OOM-killed), crash recovery retries it at most
+    # once instead of requeueing it forever (scheduling/crash_recovery.py).
+    store.update_platform_post(record.id, updated_at=_now_iso(), submission_state=PREPARING_MEDIA)
     try:
         prepared = prepare_publishable_media(
             store, storage, video,
             heartbeat=lambda: store.update_platform_post(record.id, updated_at=_now_iso()),
             timeout_seconds=INSTAGRAM_NORMALIZATION_TIMEOUT_SECONDS,
             on_probed=lambda details: _persist_probed_metadata(store, video, details),
+            threads=INSTAGRAM_NORMALIZATION_THREADS,
         )
     except PreparationError as exc:
+        # Deterministic failures (bad media, hard limits, a real ffmpeg error,
+        # the OOM killer, our timeout) park the post FAILED until the user
+        # retries. Only an interrupted encode (a non-KILL signal, e.g. the
+        # worker stopping) takes the normal bounded backoff.
+        if retry_classification.is_retryable(exc.reason_code):
+            error = PublishError(f"Video {video.id}: {exc}", reason_code=exc.reason_code)
+            _schedule_retry_or_fail(store, record, error)
+            raise PublishTikTokError(str(error), reason_code=exc.reason_code) from None
         error = PublishTikTokError(f"Video {video.id}: {exc}", reason_code=exc.reason_code)
         _mark_precondition_failed(store, record, error)
         raise error from None

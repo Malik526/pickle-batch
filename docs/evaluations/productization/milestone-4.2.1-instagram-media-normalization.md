@@ -102,3 +102,11 @@ Unchanged, because each post still goes through `retry_platform_post`:
 Pending deploy. Then press Retry on the 4K post (video 18): expect Scheduled → Processing →
 Published with no re-upload, and the worker log `instagram_media_normalized …
 output_resolution=1080x1920`.
+
+## Addendum — 2026-10-11 (later): live 4.2.2 retry reached normalization
+
+After the 4.2.2 deploy, Retry on video 18's post reached media preparation: the 404 is fixed.
+The 4K encode was then killed with `exit_code=-9`, and production shows post 33
+`FAILED / INSTAGRAM_MEDIA_PREPARATION_FAILED` at 2026-10-11 00:22:30 UTC. Cause: unbounded ffmpeg
+threads exhausting the worker's memory. Fixed in
+[4.2.3](milestone-4.2.3-resource-safe-normalization.md).

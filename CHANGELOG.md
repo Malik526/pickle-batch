@@ -2,6 +2,30 @@
 
 ## 2026-10-11
 
+### Milestone 4.2.3 — Resource-Safe Instagram Normalization + No Re-Encode Loops
+
+- Root cause of `exit_code=-9`: ffmpeg sized its thread pools from the visible host cores, and
+  its memory with them; SIGKILL then came from the OOM killer. Reproduced with an iPhone-style
+  portrait 4K source: auto threads → 66 threads, 1,185 MB peak; capped → 7 threads, 343 MB, no
+  slower.
+- Normalization now caps decoder and encoder threads (`INSTAGRAM_NORMALIZATION_THREADS`,
+  default 2) and filter threads (1). The output policy is unchanged. It logs `threads`, the
+  container's `memory_limit_mb`/CPU counts, ffmpeg `peak_rss_mb` and encode time.
+- Encode endings are classified: real error → `…_PREPARATION_FAILED`; timeout → `…_TIMEOUT`;
+  SIGKILL → `…_KILLED` (new, terminal: explicit Retry); other signal → `…_INTERRUPTED` (new,
+  bounded backoff).
+- No more re-encode loops: preparation runs under a new `submission_state = PREPARING_MEDIA`.
+  Crash recovery retries a stale preparing claim once (after 15 min), then parks it FAILED;
+  before, it requeued it without limit. The Queue shows Processing while preparing. Duplicate
+  prevention and M4.2.2 Retry are unchanged.
+- Tests: +6 normalization tests (thread caps, real `kill -9`/`-15`/exit classification, RSS
+  sampling, a constrained 4K encode under 700 MB) and +6 worker flow scenarios × SQLite/Postgres
+  (due 4K publish, deterministic and OOM failures never reclaimed, interrupted backoff, worker
+  death bounded, heartbeat plus Processing). See
+  `docs/evaluations/productization/milestone-4.2.3-resource-safe-normalization.md`.
+- Full backend 1568 passed, 1 failed (the known pre-existing test-bucket failure). No frontend
+  change.
+
 ### Milestone 4.2.2 — Retry for Instagram Slots Reaches the Post
 
 - Root cause: the Queue's Retry sends no platform and `RetryPublishRequest.platform` defaulted

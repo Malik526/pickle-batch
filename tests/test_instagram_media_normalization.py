@@ -249,7 +249,7 @@ def test_ffmpeg_failure_is_a_clear_preparation_error(store, storage, tmp_path, m
     caplog.set_level("INFO")
     video = _upload(store, storage, tmp_path, media["landscape_4k"])
     monkeypatch.setattr(normalization, "build_ffmpeg_command",
-                        lambda src, dst, plan: ["ffmpeg", "-loglevel", "error", "-i", str(src), "-c:v", "no_such_encoder", str(dst)])
+                        lambda src, dst, plan, **_: ["ffmpeg", "-loglevel", "error", "-i", str(src), "-c:v", "no_such_encoder", str(dst)])
     with pytest.raises(PreparationError) as raised:
         _prepare(store, storage, video)
     assert raised.value.reason_code == "INSTAGRAM_MEDIA_PREPARATION_FAILED"
@@ -261,7 +261,7 @@ def test_ffmpeg_failure_is_a_clear_preparation_error(store, storage, tmp_path, m
 
 def test_timeout_kills_the_encode_and_heartbeats_meanwhile(store, storage, tmp_path, media, monkeypatch):
     video = _upload(store, storage, tmp_path, media["landscape_4k"])
-    monkeypatch.setattr(normalization, "build_ffmpeg_command", lambda src, dst, plan: ["sleep", "12"])
+    monkeypatch.setattr(normalization, "build_ffmpeg_command", lambda src, dst, plan, **_: ["sleep", "12"])
     monkeypatch.setattr(normalization, "HEARTBEAT_SECONDS", 0)
     beats = []
     with pytest.raises(PreparationError) as raised:
@@ -299,3 +299,60 @@ def _replace(details, **changes):
     from dataclasses import replace
 
     return replace(details, **changes)
+
+
+# --- Milestone 4.2.3: bounded resources and failure classification ----------------------------
+
+def test_command_caps_decoder_encoder_and_filter_threads():
+    plan = normalization.plan_normalization(_details(coded_width=3840, coded_height=2160, rotation=90))
+    command = normalization.build_ffmpeg_command(Path("in.mov"), Path("out.mp4"), plan, threads=2)
+    input_at = command.index("-i")
+    assert command[input_at - 2:input_at] == ["-threads", "2"]  # decoder (input option)
+    encoder_at = command.index("-c:v")
+    assert command[encoder_at:encoder_at + 4] == ["-c:v", "libx264", "-threads", "2"]  # encoder
+    assert command[command.index("-filter_threads") + 1] == "1"
+    assert command[command.index("-vf") + 1] == "scale=1080:1920,format=yuv420p"  # output policy unchanged
+
+
+@pytest.mark.parametrize(("exit_code", "reason"), [(-9, normalization.KILLED), (-15, normalization.INTERRUPTED),
+                                                    (1, normalization.FAILED), (234, normalization.FAILED)])
+def test_exit_codes_are_classified(exit_code, reason):
+    assert normalization.classify_exit(exit_code) == reason
+
+
+@pytest.mark.parametrize(("script", "reason"), [("kill -9 $$", normalization.KILLED), ("kill -15 $$", normalization.INTERRUPTED),
+                                                ("exit 3", normalization.FAILED)])
+def test_real_process_endings_are_classified(tmp_path, monkeypatch, script, reason):
+    monkeypatch.setattr(normalization, "build_ffmpeg_command", lambda src, dst, plan, **_: ["bash", "-c", script])
+    plan = normalization.plan_normalization(_details(coded_width=3840, coded_height=2160))
+    with pytest.raises(normalization.NormalizationError) as raised:
+        normalization.normalize(tmp_path / "in.mov", tmp_path / "out.mp4", plan, source_details=_details())
+    assert raised.value.reason_code == reason and raised.value.stage == "encode"
+
+
+def test_peak_memory_of_the_encode_is_measured(tmp_path, monkeypatch):
+    allocate = "import time; b = bytearray(80 * 1024 * 1024); b[::4096] = b'x' * len(b[::4096]); time.sleep(2.5)"
+    monkeypatch.setattr(normalization, "build_ffmpeg_command", lambda src, dst, plan, **_: ["python3", "-c", allocate])
+    plan = normalization.plan_normalization(_details(coded_width=3840, coded_height=2160))
+    with pytest.raises(normalization.NormalizationError) as raised:  # exits 0 without an output file
+        normalization.normalize(tmp_path / "in.mov", tmp_path / "out.mp4", plan, source_details=_details())
+    assert raised.value.peak_rss_mb is not None and raised.value.peak_rss_mb >= 70
+
+
+def test_resource_limits_report_values_only():
+    limits = normalization.resource_limits()
+    assert set(limits) == {"memory_limit_mb", "visible_cpus", "usable_cpus"}
+    assert limits["visible_cpus"] is None or limits["visible_cpus"] >= 1
+
+
+def test_constrained_portrait_4k_encode_stays_within_a_memory_bound(tmp_path, media):
+    source = probe_streams(media["iphone_portrait_4k"])
+    plan = normalization.plan_normalization(source)
+    output, encode = normalization.normalize(media["iphone_portrait_4k"], tmp_path / "reel.mp4", plan,
+                                             source_details=source, threads=2)
+    assert (output.display_width, output.display_height) == (1080, 1920)
+    assert encode.exit_code == 0 and encode.seconds > 0
+    # Auto-threaded, the same kind of encode peaked ~1.2 GB on a 16-core machine;
+    # capped at 2 threads it stays a few hundred MB. Generous bound for CI noise.
+    if encode.peak_rss_mb is not None:
+        assert encode.peak_rss_mb < 700

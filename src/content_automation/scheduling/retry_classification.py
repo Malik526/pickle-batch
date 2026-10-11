@@ -64,6 +64,9 @@ _RETRYABLE_REASON_CODES = frozenset({
     "INSTAGRAM_TRANSIENT_ERROR",
     "INSTAGRAM_MEDIA_FETCH_FAILED",
     "INSTAGRAM_RATE_LIMITED",
+    # Milestone 4.2.3: ffmpeg stopped by a signal other than SIGKILL (e.g.
+    # SIGTERM while the worker shuts down) — the normal bounded backoff.
+    "INSTAGRAM_MEDIA_PREPARATION_INTERRUPTED",
 })
 
 # Always terminal regardless of http_status — local validation, account/
@@ -102,6 +105,10 @@ _TERMINAL_REASON_CODES = frozenset({
     # Milestone 4.2.1: the same file fails the same way on every attempt.
     "INSTAGRAM_MEDIA_PREPARATION_FAILED",
     "INSTAGRAM_MEDIA_PREPARATION_TIMEOUT",
+    # Milestone 4.2.3: SIGKILL from outside = the kernel OOM killer. Retrying
+    # automatically would just re-run the same out-of-memory encode, so it
+    # waits for an explicit Retry (after the resources are fixed).
+    "INSTAGRAM_MEDIA_PREPARATION_KILLED",
 })
 
 

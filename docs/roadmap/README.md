@@ -39,7 +39,8 @@ starts `autobuild run`.
 | 2 | M4.1B | Validate Instagram OAuth against Meta | YELLOW | Live connection proven (@picklebatchapp); token-refresh observation pending | [Brief](milestone-4.1/M4.1B-live-meta-oauth-validation.md) |
 | 3 | M4.2 | Instagram Reels publishing | YELLOW (live publishing) | Live Reel published 2026-10-10; restart test pending | Manual brief; see [evaluation](../evaluations/productization/milestone-4.2-instagram-reels-publishing.md) |
 | 4 | M4.2.1 | Instagram media normalization | YELLOW (live publishing) | Committed; Supabase-path test, delete cleanup and live 4K pending | [Handover](milestone-4.2.1/M4.2.1-handover.md); see [evaluation](../evaluations/productization/milestone-4.2.1-instagram-media-normalization.md) |
-| 5 | M4.2.2 | Retry legacy Instagram media failures | YELLOW (live publishing) | Implemented and tested; live retry of video 18 pending deploy | Manual brief; see [evaluation](../evaluations/productization/milestone-4.2.1-instagram-media-normalization.md) |
+| 5 | M4.2.2 | Retry legacy Instagram media failures | YELLOW (live publishing) | Committed; live retry reached normalization, which was OOM-killed (fixed in M4.2.3) | Manual brief; see [evaluation](../evaluations/productization/milestone-4.2.1-instagram-media-normalization.md) |
+| 6 | M4.2.3 | Resource-safe normalization + retry backoff | YELLOW (live publishing) | Implemented and tested; live retry of video 18 pending deploy | Manual brief; see [evaluation](../evaluations/productization/milestone-4.2.3-resource-safe-normalization.md) |
 
 ## Handoff
 

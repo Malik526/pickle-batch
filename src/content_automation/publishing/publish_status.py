@@ -103,10 +103,18 @@ _ATTENTION_MESSAGES = {
 # posting call may be in flight. The one definition: scheduling/finalization.py
 # (which writes it) and scheduling/manual_recovery.py import it from here.
 PUBLISH_REQUESTED = "PUBLISH_REQUESTED"
+# Milestone 4.2.3: submission_state while the claim is preparing media
+# (Instagram normalization) and nothing has been sent to the platform.
+# Written by scheduling/publish_tiktok.py; read by crash recovery and here.
+PREPARING_MEDIA = "PREPARING_MEDIA"
 
 
 def _publishing_stage(post: PlatformPostRecord) -> str | None:
-    if post.platform != "instagram" or not post.platform_post_id:
+    if post.platform != "instagram":
+        return None
+    if post.submission_state == PREPARING_MEDIA:  # Milestone 4.2.3: normalizing the video
+        return "PROCESSING"
+    if not post.platform_post_id:
         return None
     return "PUBLISHING" if post.submission_state == PUBLISH_REQUESTED else "PROCESSING"
 
@@ -115,6 +123,8 @@ def _publishing_message(post: PlatformPostRecord) -> str:
     """Milestone 4.2: Instagram's two steps read differently — Meta is
     processing the uploaded container, or the post itself is being made."""
     label = platform_label(post.platform)
+    if post.platform == "instagram" and post.submission_state == PREPARING_MEDIA:
+        return f"Preparing the video for {label}…"
     if post.platform == "instagram" and post.platform_post_id:
         if post.submission_state == PUBLISH_REQUESTED:
             return f"Publishing to {label}…"

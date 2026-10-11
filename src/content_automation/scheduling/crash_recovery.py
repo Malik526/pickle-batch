@@ -73,7 +73,7 @@ from datetime import datetime, timedelta, timezone
 from content_automation.config import MAX_RETRY_ATTEMPTS, PLATFORM_POST_STALE_MINUTES, RETRY_BACKOFF_MINUTES
 from content_automation.persistence.content_store import ContentStore
 from content_automation.publishing.publisher import PublishError, Publisher
-from content_automation.scheduling.publish_tiktok import AWAITING_PLATFORM_ID, _resolve_poll_outcome
+from content_automation.scheduling.publish_tiktok import AWAITING_PLATFORM_ID, PREPARING_MEDIA, _resolve_poll_outcome
 from content_automation.scheduling.slot_matcher import now_in_config_timezone
 from content_automation.scheduling.finalization import finalize_ready_submission
 from content_automation.scheduling.worker import log_event
@@ -145,6 +145,8 @@ def recover_stale_posts_once(
                     log_event("recovery_requeued", **ids, decision="NEVER_SUBMITTED")
             elif record.submission_state == AWAITING_PLATFORM_ID:
                 _recover_interrupted_submission(store, record, summary, ids, user_id)
+            elif record.submission_state == PREPARING_MEDIA:
+                _recover_interrupted_preparation(store, record, summary, ids, user_id)
             else:
                 # Case A3: may have been accepted; no id to check. Park it.
                 parked = store.update_platform_post_if_unchanged(
@@ -249,3 +251,41 @@ def _recover_interrupted_submission(store, record, summary: RecoverySummary, ids
     if moved:
         summary.failed += 1
         log_event("recovery_failed", **ids, decision="RETRIES_EXHAUSTED", failure_code="SUBMISSION_INTERRUPTED")
+
+
+# Milestone 4.2.3: the failure code an interrupted media preparation gets.
+PREPARATION_INTERRUPTED = "INSTAGRAM_MEDIA_PREPARATION_INTERRUPTED"
+PREPARATION_RETRY_DELAY_MINUTES = 15
+
+
+def _recover_interrupted_preparation(store, record, summary: RecoverySummary, ids: dict, user_id) -> None:
+    """Case A4 (Milestone 4.2.3): the worker died while preparing media —
+    nothing was sent to the platform. The heartbeat keeps a live encode
+    fresh, so a stale PREPARING_MEDIA row means the worker process itself
+    stopped: a deploy restart, or the container being OOM-killed by the
+    encode. Before 4.2.3 this fell into Case A1 and was requeued for free
+    forever — an encode that kills the container would loop every
+    PLATFORM_POST_STALE_MINUTES. Now it's retried once, after
+    PREPARATION_RETRY_DELAY_MINUTES (a deploy restart recovers on its own);
+    a second interruption parks it FAILED for an explicit Retry."""
+    if record.failure_code == PREPARATION_INTERRUPTED:
+        moved = store.update_platform_post_if_unchanged(
+            record.id, expected_updated_at=record.updated_at, updated_at=_now_iso(), user_id=user_id,
+            status="FAILED", submission_state=None, failure_code=PREPARATION_INTERRUPTED,
+            failure_reason="The worker stopped twice while preparing this video's media; waiting for an explicit Retry.",
+        )
+        if moved:
+            summary.failed += 1
+            log_event("recovery_failed", **ids, decision="PREPARATION_INTERRUPTED_TWICE", failure_code=PREPARATION_INTERRUPTED)
+        return
+    next_retry_at = (now_in_config_timezone() + timedelta(minutes=PREPARATION_RETRY_DELAY_MINUTES)).isoformat()
+    moved = store.update_platform_post_if_unchanged(
+        record.id, expected_updated_at=record.updated_at, updated_at=_now_iso(), user_id=user_id,
+        status="PENDING", retry_count=record.retry_count + 1, next_retry_at=next_retry_at, submission_state=None,
+        failure_code=PREPARATION_INTERRUPTED,
+        failure_reason="The worker stopped while preparing this video's media; nothing was sent to the platform.",
+    )
+    if moved:
+        summary.retry_scheduled += 1
+        log_event("recovery_retry_scheduled", **ids, decision="PREPARATION_INTERRUPTED",
+                  retry_count=record.retry_count + 1, next_retry_at=next_retry_at)

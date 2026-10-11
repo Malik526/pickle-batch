@@ -41,6 +41,8 @@ Dependencies:
   ffmpeg/ffprobe on PATH, media.stream_probe, publishing.instagram.media_requirements.
 """
 
+import os
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -63,18 +65,80 @@ AUDIO_KBPS = 128
 SIZE_BUDGET_FRACTION = 0.9
 HEARTBEAT_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 3600
+# Milestone 4.2.3 — bounded resources. ffmpeg and x264 size their thread
+# pools from the VISIBLE core count, and memory grows with threads (each
+# frame thread buffers frames; a decoded 4K frame is ~12 MB). In a container
+# that sees many host cores under a smaller memory cap, that got the encode
+# OOM-killed (exit -9). Measured on a 6 s, 113 Mb/s iPhone-style portrait 4K
+# source: auto threads 66 threads / 1,185 MB peak RSS / 3.4 s; 2 threads
+# 7 threads / 343 MB / 2.6 s; 1 thread 267 MB / 9.1 s. DEFAULT_THREADS caps
+# decoder and encoder threads; the scale filter runs single-threaded.
+DEFAULT_THREADS = 2
+FILTER_THREADS = 1
+_RESOURCE_POLL_SECONDS = 1
+
+
+# reason codes (Milestone 4.2.3 split): a real encode error, our own
+# timeout, SIGKILL from outside (the kernel OOM killer — resource
+# exhaustion), and any other signal (e.g. SIGTERM while the worker stops).
+FAILED = "INSTAGRAM_MEDIA_PREPARATION_FAILED"
+TIMEOUT = "INSTAGRAM_MEDIA_PREPARATION_TIMEOUT"
+KILLED = "INSTAGRAM_MEDIA_PREPARATION_KILLED"
+INTERRUPTED = "INSTAGRAM_MEDIA_PREPARATION_INTERRUPTED"
 
 
 class NormalizationError(Exception):
-    """reason_code: INSTAGRAM_MEDIA_PREPARATION_FAILED or
-    INSTAGRAM_MEDIA_PREPARATION_TIMEOUT. stage/exit_code: safe diagnostics."""
+    """reason_code: one of FAILED / TIMEOUT / KILLED / INTERRUPTED above.
+    stage/exit_code/peak_rss_mb: safe diagnostics."""
 
-    def __init__(self, message: str, *, reason_code: str = "INSTAGRAM_MEDIA_PREPARATION_FAILED",
-                 stage: str, exit_code: int | None = None):
+    def __init__(self, message: str, *, reason_code: str = FAILED, stage: str, exit_code: int | None = None,
+                 peak_rss_mb: int | None = None):
         super().__init__(message)
         self.reason_code = reason_code
         self.stage = stage
         self.exit_code = exit_code
+        self.peak_rss_mb = peak_rss_mb
+
+
+def classify_exit(exit_code: int) -> str:
+    """Map a finished ffmpeg's return code (Popen: negative = killed by that
+    signal) to a reason code. Our own timeout is raised before this runs."""
+    if exit_code == -signal.SIGKILL:
+        return KILLED
+    if exit_code < 0:
+        return INTERRUPTED
+    return FAILED
+
+
+def _peak_rss_kb(pid: int) -> int | None:
+    """The process's peak resident memory so far (VmHWM), Linux only."""
+    try:
+        with open(f"/proc/{pid}/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def resource_limits() -> dict:
+    """The container's memory limit (cgroup v2/v1) and CPU counts, for logs.
+    Values only — no paths or identifiers."""
+    memory_limit_mb = None
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw.isdigit() and int(raw) < 1 << 60:
+            memory_limit_mb = int(raw) // (1024 * 1024)
+        break
+    try:
+        usable_cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        usable_cpus = None
+    return {"memory_limit_mb": memory_limit_mb, "visible_cpus": os.cpu_count(), "usable_cpus": usable_cpus}
 
 
 @dataclass(frozen=True)
@@ -138,7 +202,8 @@ def plan_normalization(details: StreamDetails) -> NormalizationPlan | None:
     )
 
 
-def build_ffmpeg_command(source: Path, destination: Path, plan: NormalizationPlan) -> list[str]:
+def build_ffmpeg_command(source: Path, destination: Path, plan: NormalizationPlan, *,
+                         threads: int = DEFAULT_THREADS) -> list[str]:
     filters = [f"scale={plan.width}:{plan.height}"]
     if plan.tonemap_hdr:
         filters += ["zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709",
@@ -148,10 +213,13 @@ def build_ffmpeg_command(source: Path, destination: Path, plan: NormalizationPla
     filters.append("format=yuv420p")
     gop = int(round((plan.fps or 30) * 2))
     command = [
-        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-threads", str(threads),  # input option: decoder threads
+        "-i", str(source),
         "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
-        "-vf", ",".join(filters),
-        "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF), "-profile:v", "high",
+        "-filter_threads", str(FILTER_THREADS), "-vf", ",".join(filters),
+        "-c:v", "libx264", "-threads", str(threads),  # output option: encoder threads
+        "-preset", PRESET, "-crf", str(CRF), "-profile:v", "high",
         "-maxrate", f"{plan.max_video_kbps}k", "-bufsize", f"{plan.max_video_kbps * 2}k",
         "-g", str(gop), "-keyint_min", str(gop), "-sc_threshold", "0",
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
@@ -162,21 +230,36 @@ def build_ffmpeg_command(source: Path, destination: Path, plan: NormalizationPla
     return command
 
 
-def _run(command: list[str], *, timeout_seconds: int, heartbeat: Callable[[], None] | None) -> tuple[int, str]:
+@dataclass(frozen=True)
+class EncodeResult:
+    exit_code: int
+    stderr: str
+    peak_rss_mb: int | None
+    seconds: float
+
+
+def _run(command: list[str], *, timeout_seconds: int, heartbeat: Callable[[], None] | None) -> EncodeResult:
+    """Run ffmpeg, refreshing the claim via heartbeat about once a minute and
+    sampling its peak memory each second. stderr is small (-loglevel error)."""
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     started = last_beat = time.monotonic()
+    peak_kb = None
     while True:
         try:
-            _, stderr = process.communicate(timeout=5)
-            return process.returncode, stderr or ""
+            _, stderr = process.communicate(timeout=_RESOURCE_POLL_SECONDS)
+            peak = (peak_kb // 1024) if peak_kb else None
+            return EncodeResult(process.returncode, stderr or "", peak, round(time.monotonic() - started, 2))
         except subprocess.TimeoutExpired:
+            sample = _peak_rss_kb(process.pid)
+            if sample is not None:
+                peak_kb = max(peak_kb or 0, sample)
             now = time.monotonic()
             if now - started > timeout_seconds:
                 process.kill()
                 process.communicate()
                 raise NormalizationError(
                     f"Preparing the video for Instagram took longer than {timeout_seconds} s.",
-                    reason_code="INSTAGRAM_MEDIA_PREPARATION_TIMEOUT", stage="encode",
+                    reason_code=TIMEOUT, stage="encode", peak_rss_mb=(peak_kb // 1024) if peak_kb else None,
                 ) from None
             if heartbeat is not None and now - last_beat >= HEARTBEAT_SECONDS:
                 heartbeat()
@@ -184,15 +267,20 @@ def _run(command: list[str], *, timeout_seconds: int, heartbeat: Callable[[], No
 
 
 def normalize(source: Path, destination: Path, plan: NormalizationPlan, *, source_details: StreamDetails,
-              heartbeat: Callable[[], None] | None = None, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> StreamDetails:
-    """Encode `source` into `destination` per `plan` and return the
-    verified output's details. Raises NormalizationError."""
-    exit_code, stderr = _run(build_ffmpeg_command(source, destination, plan), timeout_seconds=timeout_seconds, heartbeat=heartbeat)
-    if exit_code != 0 or not destination.exists():
+              heartbeat: Callable[[], None] | None = None, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+              threads: int = DEFAULT_THREADS) -> tuple[StreamDetails, EncodeResult]:
+    """Encode `source` into `destination` per `plan`; return the verified
+    output's details and the encode's measurements. Raises NormalizationError."""
+    result = _run(build_ffmpeg_command(source, destination, plan, threads=threads),
+                  timeout_seconds=timeout_seconds, heartbeat=heartbeat)
+    if result.exit_code != 0 or not destination.exists():
         # ffmpeg's last stderr line names the failing component; it carries the
         # local temp file names at most, never URLs or credentials.
-        last_line = stderr.strip().splitlines()[-1][:200] if stderr.strip() else "no output"
-        raise NormalizationError(f"ffmpeg failed (exit {exit_code}): {last_line}", stage="encode", exit_code=exit_code)
+        last_line = result.stderr.strip().splitlines()[-1][:200] if result.stderr.strip() else "no output"
+        raise NormalizationError(
+            f"ffmpeg failed (exit {result.exit_code}): {last_line}", reason_code=classify_exit(result.exit_code),
+            stage="encode", exit_code=result.exit_code, peak_rss_mb=result.peak_rss_mb,
+        )
     try:
         output = probe_streams(destination)
     except CorruptMediaError as exc:
@@ -203,4 +291,4 @@ def normalize(source: Path, destination: Path, plan: NormalizationPlan, *, sourc
     expected, actual = source_details.duration_seconds, output.duration_seconds
     if expected and actual is not None and abs(actual - expected) > max(0.5, expected * 0.01):
         raise NormalizationError(f"The prepared file's length changed ({expected:.2f}s → {actual:.2f}s).", stage="verify")
-    return output
+    return output, result

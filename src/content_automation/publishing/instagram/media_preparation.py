@@ -40,7 +40,6 @@ Dependencies:
 """
 
 import tempfile
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,10 +91,17 @@ def _summary(details: StreamDetails, prefix: str) -> dict:
     }
 
 
+_USER_MESSAGES = {
+    normalization.TIMEOUT: "Preparing this video for Instagram took too long.",
+    normalization.KILLED: "This video could not be prepared for Instagram: the server ran out of resources.",
+    normalization.INTERRUPTED: "Preparing this video for Instagram was interrupted.",
+}
+
+
 def prepare_publishable_media(
     store: ContentStoreProtocol, storage: StorageProtocol, video: VideoRecord, *,
     heartbeat: Callable[[], None] | None = None, timeout_seconds: int = normalization.DEFAULT_TIMEOUT_SECONDS,
-    on_probed: Callable[[StreamDetails], None] | None = None,
+    on_probed: Callable[[StreamDetails], None] | None = None, threads: int = normalization.DEFAULT_THREADS,
 ) -> PreparedMedia:
     ids = {"video_id": video.id, "user_id": video.user_id, "platform": INSTAGRAM}
 
@@ -125,24 +131,22 @@ def prepare_publishable_media(
             return PreparedMedia(storage_key=video.storage_key, derived=False, reused=False, source_details=details)
 
         key = derivative_key(video, video.file_hash or inspection.file_hash(source_path))
+        limits = normalization.resource_limits()
         log_event("instagram_media_normalizing", **ids, reasons="+".join(plan.reasons), target=f"{plan.width}x{plan.height}",
-                  target_fps=plan.fps or details.fps, **_summary(details, "source"))
+                  target_fps=plan.fps or details.fps, threads=threads, **limits, **_summary(details, "source"))
         with tempfile.TemporaryDirectory(prefix="instagram-reel-") as workdir:
             output_path = Path(workdir) / "reel.mp4"
-            started = time.monotonic()
             try:
-                output = normalization.normalize(source_path, output_path, plan, source_details=details,
-                                                 heartbeat=heartbeat, timeout_seconds=timeout_seconds)
+                output, encode = normalization.normalize(source_path, output_path, plan, source_details=details,
+                                                         heartbeat=heartbeat, timeout_seconds=timeout_seconds, threads=threads)
             except normalization.NormalizationError as exc:
                 log_event("instagram_media_normalization_failed", **ids, stage=exc.stage, exit_code=exc.exit_code,
-                          failure_code=exc.reason_code, reasons="+".join(plan.reasons), **_summary(details, "source"))
-                message = (
-                    "Preparing this video for Instagram took too long." if exc.reason_code.endswith("TIMEOUT")
-                    else "This video could not be prepared for Instagram."
-                )
+                          failure_code=exc.reason_code, peak_rss_mb=exc.peak_rss_mb, threads=threads, **limits,
+                          reasons="+".join(plan.reasons), **_summary(details, "source"))
+                message = _USER_MESSAGES.get(exc.reason_code, "This video could not be prepared for Instagram.")
                 raise PreparationError(message, reason_code=exc.reason_code) from None
-            encode_seconds = round(time.monotonic() - started, 2)
             store_derived_media(store, storage, video.id, video.user_id, key, output_path)
-        log_event("instagram_media_normalized", **ids, encode_seconds=encode_seconds, reasons="+".join(plan.reasons),
+        log_event("instagram_media_normalized", **ids, encode_seconds=encode.seconds, peak_rss_mb=encode.peak_rss_mb,
+                  threads=threads, reasons="+".join(plan.reasons), **limits,
                   **_summary(details, "source"), **_summary(output, "output"))
         return PreparedMedia(storage_key=key, derived=True, reused=False, source_details=details)
